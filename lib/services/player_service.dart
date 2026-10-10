@@ -26,6 +26,7 @@
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -495,8 +496,15 @@ class PlayerService extends ChangeNotifier {
       if (identical(_piCtrl, ctrl)) _piCtrl = null;
       notifyListeners();
       debugPrint('Pi init failed ${ch.name}: $e');
-      s.setPlayError(
-          'The Pi could not open this stream (format or network). Retry, or pick a green-dot channel.');
+      // The classic Pi setup miss: flutter-pi was compiled WITHOUT
+      // gstreamer support, so the native side of channel
+      // flutter-pi/gstreamerVideoPlayer doesn't exist. Nothing can play
+      // until flutter-pi is rebuilt (see README) — say so directly.
+      final noNativePlugin = e is MissingPluginException ||
+          '$e'.contains('gstreamerVideoPlayer');
+      s.setPlayError(noNativePlugin
+          ? 'This flutter-pi has no video plugin — rebuild flutter-pi with gstreamer support, then restart the app.'
+          : 'The Pi could not open this stream (format or network). Retry, or pick a green-dot channel.');
       return;
     }
     if (seq != _piSeq || _disposed) return;
