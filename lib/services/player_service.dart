@@ -694,6 +694,16 @@ class PlayerService extends ChangeNotifier {
   static bool _isHlsUrl(String url) =>
       url.toLowerCase().contains('.m3u8');
 
+  static bool _isDashUrl(String url) =>
+      url.toLowerCase().contains('.mpd');
+
+  /// Browsers get served; bare GStreamer UAs get 403s on hotlink-protected
+  /// panel origins — a whole class of "plays on Windows mpv, dead on Pi".
+  /// Stock path sends it via httpHeaders (native source-setup hook); the
+  /// tank string sets it inline (no native hooks touch that chain).
+  static const _piUserAgent =
+      'Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36';
+
   /// Tank pipeline: an explicit bank ahead of the decoder. uridecodebin
   /// (the stock path) hides small internal queues, so stalls hit the screen
   /// directly. Here queue2 banks [bankSecs] of media, absorbing segment
@@ -715,9 +725,11 @@ class PlayerService extends ChangeNotifier {
     const queue =
         'queue2 max-size-buffers=0 max-size-bytes=0 max-size-time={NS} use-buffering=true';
     final q = queue.replaceAll('{NS}', '$bankNs');
+    final src =
+        'souphttpsrc location="$loc" user-agent="$_piUserAgent"';
     final head = _isHlsUrl(url)
-        ? 'souphttpsrc location="$loc" ! hlsdemux ! $q'
-        : 'souphttpsrc location="$loc" ! $q';
+        ? '$src ! hlsdemux ! $q'
+        : (_isDashUrl(url) ? '$src ! dashdemux ! $q' : '$src ! $q');
     return '$head ! decodebin ! videoconvert ! appsink name=sink sync=true';
   }
 
@@ -790,6 +802,9 @@ class PlayerService extends ChangeNotifier {
           formatHint:
               _isHlsUrl(ch.streamUrl) ? VideoFormat.hls : null,
           videoPlayerOptions: VideoPlayerOptions(mixWithOthers: false),
+          // Native ignores headers on custom pipelines (no "src" hook) —
+          // the UA already rides inline in the string. Harmless to pass.
+          httpHeaders: const {'User-Agent': _piUserAgent},
         );
         tankPath = true;
         final err = await _piAttachInit(next, 10);
@@ -829,6 +844,9 @@ class PlayerService extends ChangeNotifier {
           formatHint:
               _isHlsUrl(ch.streamUrl) ? VideoFormat.hls : null,
           videoPlayerOptions: VideoPlayerOptions(mixWithOthers: false),
+          // Browser UA via the native source-setup hook (souphttpsrc
+          // extra-headers) — same hotlink class as the tank string.
+          httpHeaders: const {'User-Agent': _piUserAgent},
         );
         final err = await _piAttachInit(next, 25);
         if (err != null) throw err;
