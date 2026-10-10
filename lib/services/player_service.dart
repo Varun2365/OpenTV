@@ -689,19 +689,21 @@ class PlayerService extends ChangeNotifier {
   static bool _isHlsUrl(String url) =>
       url.toLowerCase().contains('.m3u8');
 
-  /// Tank pipeline: an explicit, observable bank ahead of the decoder.
-  /// uridecodebin (the stock path) hides small internal queues and never
-  /// answers GST_QUERY_BUFFERING, so Dart can neither see nor size any bank
-  /// there. Here queue2 (a) banks [bankSecs] of media, absorbing segment
-  /// jitter and slow origins, and (b) answers buffering queries, so buffered
-  /// ranges + buffering start/end events reach Dart and the tank bar,
-  /// rebuffer pill and watchdogs become REAL instead of proxies. decodebin
+  /// Tank pipeline: an explicit bank ahead of the decoder. uridecodebin
+  /// (the stock path) hides small internal queues, so stalls hit the screen
+  /// directly. Here queue2 banks [bankSecs] of media, absorbing segment
+  /// jitter and slow origins — REAL stall protection even though it stays
+  /// invisible: the native side sends its buffering query to the pipeline,
+  /// which never reaches queue2 through decodebin, so Dart ranges stay empty
+  /// on both paths (the permanent "Could not query buffering state" spam —
+  /// harmless, ignore it) and the bar remains an elapsed proxy. decodebin
   /// (not a fixed codec chain) keeps H264/HEVC/etc. working; videoconvert
   /// lands decoder output in the EGL-uploadable formats appsink accepts. No
   /// audio branch — same as stock (Pi audio is a separate step). Only the
   /// element named "sink" is required by the native side; nothing is named
   /// "src" on purpose, so the native uri/headers/element-added hooks (built
-  /// for uridecodebin) leave this chain untouched.
+  /// for uridecodebin) leave this chain untouched — the "Couldn't find src"
+  /// log line is that hook standing down, also harmless.
   static String _piTankPipeline(String url, int bankSecs) {
     final loc = url.replaceAll('"', '%22');
     final bankNs = bankSecs * 1000000000;
