@@ -31,6 +31,8 @@ import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:video_player/video_player.dart';
+import 'package:video_player_platform_interface/video_player_platform_interface.dart'
+    hide VideoTrack;
 
 import '../models/tv_channel.dart';
 import 'app_state.dart';
@@ -74,13 +76,15 @@ class PlayerService extends ChangeNotifier {
   Duration _lastPosition = Duration.zero;
   Timer? _stallTimer;
   Timer? _loadWatchdog;
-  // Pi freeze detection: video_player polls getPosition() every 100ms while
-  // playing, so a healthy pipeline advances position constantly. Static
+  // Pi freeze detection: our own 2s position poll (see _piPollTick) is the
+  // ONLY flow signal — video_player's 100ms poll never starts because we
+  // never call controller.play()/pause() on Pi (see _piPlayRaw). Static
   // position + isPlaying + first frame on screen = wedged pipeline (stuck
-  // preroll / starved live edge). _checkPiFlow recovers it (re-kick, then
-  // fresh reopen) instead of showing one frame forever. Costs nothing when
-  // healthy: three timestamps + one int, checked every 3s.
-  Timer? _flowTimer;
+  // preroll / starved live edge); a throwing poll = dead pipeline
+  // (GST_STATE_CHANGE_FAILURE). _piPollTick recovers (re-kick, then fresh
+  // reopen) instead of showing one frame forever. Costs nothing when
+  // healthy: one native query per 2s plus timestamps + ints.
+  Timer? _piPollTimer;
   DateTime _lastFlowAt = DateTime.now();
   int _flowStrikes = 0;
   DateTime _lastRecoveryAt =
@@ -204,12 +208,12 @@ class PlayerService extends ChangeNotifier {
             : 'Still no picture after 90s — the link is likely dead. Retry, or pick a green-dot channel.');
       }
     });
-    // Pi freeze watchdog: a wedged pipeline shows exactly one frame forever.
-    // Desktop mpv self-recovers via reconnect + stall logic, so Pi-only.
+    // Pi flow poll (2s): position source + freeze/death recovery. Desktop
+    // mpv self-recovers via reconnect + stall logic, so Pi-only.
     if (_piMode) {
-      _flowTimer =
-          Timer.periodic(const Duration(seconds: 3), (_) {
-        unawaited(_checkPiFlow());
+      _piPollTimer =
+          Timer.periodic(const Duration(seconds: 2), (_) {
+        unawaited(_piPollTick());
       });
     }
     // State is the boss: any play/stop (TV, keyboard, phone) drives the
@@ -425,6 +429,29 @@ class PlayerService extends ChangeNotifier {
         'has gstreamer1.0-plugins-{base,good,bad,ugly,libav} installed.');
   }
 
+  /// Seek-free play/pause for the Pi backend. VideoPlayerController.play()
+  /// silently runs seekTo(0) whenever value.position == value.duration —
+  /// routine for live HLS with degenerate durations — and a flush-seek at 0
+  /// wedges live pipelines (native "Could not set the new playback speed /
+  /// playback position" → GST_STATE_CHANGE_FAILURE → EIO storm). The two
+  /// platform calls below are exactly what play()/pause() do minus the seek
+  /// (verified against the video_player 2.11 source); value sync is manual,
+  /// and our own poll (never the 100ms timer) tracks position. playerId is
+  /// visibleForTesting upstream — the VideoPlayer widget itself uses it.
+  Future<void> _piPlayRaw(VideoPlayerController c) async {
+    // ignore: invalid_use_of_visible_for_testing_member
+    final id = c.playerId;
+    c.value = c.value.copyWith(isPlaying: true);
+    await VideoPlayerPlatform.instance.play(id);
+  }
+
+  Future<void> _piPauseRaw(VideoPlayerController c) async {
+    // ignore: invalid_use_of_visible_for_testing_member
+    final id = c.playerId;
+    c.value = c.value.copyWith(isPlaying: false);
+    await VideoPlayerPlatform.instance.pause(id);
+  }
+
   void _onPiUpdate() {
     final s = _state;
     final c = _piCtrl;
@@ -445,15 +472,9 @@ class PlayerService extends ChangeNotifier {
       // entered buffering — keep old progress clock (watchdog measures
       // dry time), don't reset.
     }
-    // Position advance also counts as progress (catches playbin stalls
-    // where isBuffering flickers) AND resets the freeze clock — a moving
-    // position is proof the pipeline flows.
-    if (v.position != _lastPosition) {
-      _lastPosition = v.position;
-      _lastProgress = DateTime.now();
-      _lastFlowAt = DateTime.now();
-      _flowStrikes = 0;
-    }
+    // NOTE: position tracking lives in _piPollTick (our own 2s poll), not
+    // here — without controller.play() there are no position events, and
+    // the poll is the single source of truth for flow/death.
     if (v.hasError) {
       final desc = (v.errorDescription ?? '').trim();
       if (desc.isNotEmpty) {
@@ -478,21 +499,24 @@ class PlayerService extends ChangeNotifier {
     }
   }
 
-  /// Pi freeze/death watchdog body (every 3s). Two tripwires:
+  /// Pi poll tick (every 2s): the ONLY position source and the ONLY
+  /// freeze/death judge. We never call controller.play()/pause() on Pi (see
+  /// _piPlayRaw), so video_player's 100ms poll never starts — this
+  /// try/catch-guarded native query replaces it at a Pi-friendly cadence.
+  /// Two tripwires:
   ///  - FROZEN: first frame on screen + playing state, but the position
   ///    clock hasn't advanced for 8s+ (wedged preroll / starved live edge).
-  ///  - DEAD: getPosition throws PlatformException(nativeerror, I/O error),
-  ///    i.e. GST_STATE_CHANGE_FAILURE — the pipeline is gone. video_player's
-  ///    own 100ms poll hits the same wall as an UNHANDLED exception (log
-  ///    storm), so death pauses first to kill its timer.
-  /// Recovery ladder: re-kick PLAYING for frozen (cheap), straight to
-  /// reopen for dead (set_state on FAILURE stays FAILURE — re-kicks are
+  ///  - DEAD: the poll throws PlatformException(nativeerror, I/O error),
+  ///    i.e. GST_STATE_CHANGE_FAILURE — the pipeline is gone. Death pauses
+  ///    first (raw, seek-free) so nothing else interrogates the corpse.
+  /// Recovery ladder: raw re-kick for frozen (cheap, never seeks), straight
+  /// to reopen for dead (set_state on FAILURE stays FAILURE — re-kicks are
   /// pointless), breather before reconnecting (instant reconnects read as
   /// abuse and get throttled), honest error card at the cap. A re-death
   /// within 90s backs off immediately — hammering a throttling server kills
   /// the channel for good. Everything resets the moment position moves or
   /// the user zaps. Zero allocation while healthy.
-  Future<void> _checkPiFlow() async {
+  Future<void> _piPollTick() async {
     if (_disposed || !_piMode) return;
     final s = _state;
     if (s == null) return;
@@ -506,21 +530,30 @@ class PlayerService extends ChangeNotifier {
     } catch (_) {
       return; // controller gone mid-check
     }
-    // Definitive death probe, in try/catch by design.
+    // Liveness probe + flow clock, in try/catch by design. A moving
+    // position is proof the pipeline flows.
     var dead = false;
     try {
-      await c.position;
+      final pos = await c.position;
+      if (!identical(_piCtrl, c) || s.playing?.id != ch.id) return;
+      if (pos != null && pos != _lastPosition) {
+        _lastPosition = pos;
+        _lastProgress = DateTime.now();
+        _lastFlowAt = DateTime.now();
+        _flowStrikes = 0;
+      }
     } on PlatformException catch (e) {
       dead = true;
-      debugPrint('Pi flow watchdog: pipeline dead ($e)');
+      debugPrint('Pi poll: pipeline dead ($e)');
     } catch (_) {}
     if (!identical(_piCtrl, c) || s.playing?.id != ch.id) return;
+    if (s.playError != null) return;
     if (dead) {
       try {
-        await c.pause();
-      } catch (_) {} // silence the 100ms EIO storm immediately
+        await _piPauseRaw(c);
+      } catch (_) {} // park it; nothing else should touch the corpse
       if (DateTime.now().difference(_lastDeathAt).inSeconds < 90) {
-        debugPrint('Pi flow watchdog: re-died within 90s, '
+        debugPrint('Pi poll: re-died within 90s, '
             'backing off (${ch.name})');
         s.setPlayError(
             'The server stopped serving this stream (throttled or expired link). Wait a bit, then retry — or pick another channel.');
@@ -543,17 +576,17 @@ class PlayerService extends ChangeNotifier {
       _flowStrikes += dead ? 3 : 1;
       _lastRecoveryAt = DateTime.now();
       if (_flowStrikes <= 2) {
-        // Cheap re-kick: re-issue the state change. Fixes pipelines stuck
-        // between PAUSED preroll and PLAYING (the classic 1-frame freeze).
-        debugPrint('Pi flow watchdog: picture frozen, '
+        // Cheap raw re-kick: re-issue the state change with zero seeks.
+        // Fixes pipelines stuck between PAUSED preroll and PLAYING.
+        debugPrint('Pi poll: picture frozen, '
             're-kick #$_flowStrikes (${ch.name})');
-        await c.pause();
+        await _piPauseRaw(c);
         await Future.delayed(
             const Duration(milliseconds: 400));
         if (seq != _piSeq || _disposed) return;
         if (s.playing?.id != ch.id || s.playError != null) return;
         if (!identical(_piCtrl, c)) return;
-        await c.play();
+        await _piPlayRaw(c);
         _lastFlowAt = DateTime.now();
       } else if (_flowStrikes <= 4) {
         // Fresh pipeline at the live edge — the only cure for a failed or
@@ -565,14 +598,14 @@ class PlayerService extends ChangeNotifier {
           if (seq != _piSeq || _disposed) return;
           if (s.playing?.id != ch.id || s.playError != null) return;
         }
-        debugPrint('Pi flow watchdog: reopening '
+        debugPrint('Pi poll: reopening '
             '#$_flowStrikes (${ch.name})');
         _autoReopen = true; // preserve the ladder across the reopen
         _lastFlowAt = DateTime.now();
         _currentId = null; // force reopen of the same channel
         s.play(ch);
       } else {
-        debugPrint('Pi flow watchdog: giving up after $_flowStrikes '
+        debugPrint('Pi poll: giving up after $_flowStrikes '
             'attempts (${ch.name})');
         s.setPlayError(
             'This stream keeps freezing on the Pi — retry later, or pick a green-dot channel.');
@@ -596,7 +629,7 @@ class PlayerService extends ChangeNotifier {
         old.removeListener(_onPiUpdate);
       } catch (_) {}
       try {
-        await old.pause();
+        await _piPauseRaw(old);
       } catch (_) {}
       try {
         await old.dispose();
@@ -671,7 +704,7 @@ class PlayerService extends ChangeNotifier {
     } catch (_) {}
     final playAt = DateTime.now();
     try {
-      await ctrl.play();
+      await _piPlayRaw(ctrl); // raw: no implicit seekTo(0) on live streams
     } catch (e) {
       s.setPlayError('Could not start playback ($e).');
       return;
@@ -805,7 +838,7 @@ class PlayerService extends ChangeNotifier {
         old.removeListener(_onPiUpdate);
       } catch (_) {}
       try {
-        await old.pause();
+        await _piPauseRaw(old);
       } catch (_) {}
       try {
         await old.dispose();
@@ -938,11 +971,18 @@ class PlayerService extends ChangeNotifier {
     try {
       if (_piMode) {
         final c = _piCtrl;
-        if (c == null || !c.value.isInitialized) return;
+        if (c == null) return;
+        try {
+          if (!c.value.isInitialized) return;
+        } catch (_) {
+          return;
+        }
+        // Raw throughout: controller.play() would seekTo(0) on live streams.
         if (c.value.isPlaying) {
-          await c.pause();
+          await _piPauseRaw(c);
         } else {
-          await c.play();
+          await _piPlayRaw(c);
+          _lastFlowAt = DateTime.now();
         }
       } else {
         await _player?.playOrPause();
@@ -1019,8 +1059,8 @@ class PlayerService extends ChangeNotifier {
     _stallTimer = null;
     _loadWatchdog?.cancel();
     _loadWatchdog = null;
-    _flowTimer?.cancel();
-    _flowTimer = null;
+    _piPollTimer?.cancel();
+    _piPollTimer = null;
     _prebufferDone?.complete();
     _prebufferDone = null;
     _state?.removeListener(_syncWithState);
