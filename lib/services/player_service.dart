@@ -87,6 +87,12 @@ class PlayerService extends ChangeNotifier {
   // healthy: one native query per 2s plus timestamps + ints.
   Timer? _piPollTimer;
   DateTime _lastFlowAt = DateTime.now();
+  double _lastBufferedEnd = 0;
+  // True once ANY flow signal (position or buffered-end) has moved on the
+  // current pipeline. Until then the stream is UNKNOWN, never frozen: some
+  // backends report neither signal during healthy playback, and punishing
+  // that with re-kicks murders working streams.
+  bool _signalEverMoved = false;
   int _flowStrikes = 0;
   DateTime _lastRecoveryAt =
       DateTime.fromMillisecondsSinceEpoch(0);
@@ -500,23 +506,19 @@ class PlayerService extends ChangeNotifier {
     }
   }
 
-  /// Pi poll tick (every 2s): the ONLY position source and the ONLY
-  /// freeze/death judge. We never call controller.play()/pause() on Pi (see
-  /// _piPlayRaw), so video_player's 100ms poll never starts — this
-  /// try/catch-guarded native query replaces it at a Pi-friendly cadence.
-  /// Two tripwires:
-  ///  - FROZEN: first frame on screen + playing state, but the position
-  ///    clock hasn't advanced for 8s+ (wedged preroll / starved live edge).
-  ///  - DEAD: the poll throws PlatformException(nativeerror, I/O error),
-  ///    i.e. GST_STATE_CHANGE_FAILURE — the pipeline is gone. Death pauses
-  ///    first (raw, seek-free) so nothing else interrogates the corpse.
-  /// Recovery ladder: raw re-kick for frozen (cheap, never seeks), straight
-  /// to reopen for dead (set_state on FAILURE stays FAILURE — re-kicks are
-  /// pointless), breather before reconnecting (instant reconnects read as
-  /// abuse and get throttled), honest error card at the cap. A re-death
-  /// within 90s backs off immediately — hammering a throttling server kills
-  /// the channel for good. Everything resets the moment position moves or
-  /// the user zaps. Zero allocation while healthy.
+  /// Pi poll tick (every 2s): the ONLY flow judge. We never call
+  /// controller.play()/pause() on Pi (see _piPlayRaw), so video_player's
+  /// 100ms poll never starts — this try/catch-guarded probing replaces it
+  /// at a Pi-friendly cadence. Flow is multi-signal: a moving POSITION or a
+  /// moving BUFFERED-END each prove motion (tank path reports ranges, stock
+  /// may report neither). A stream with no moving signal is UNKNOWN, never
+  /// frozen — recovery would murder healthy playback. Only a throwing poll
+  /// (PlatformException = GST_STATE_CHANGE_FAILURE) proves DEATH, and death
+  /// pauses first (raw, seek-free) so nothing interrogates the corpse.
+  /// Recovery ladder: raw re-kick for proven-frozen (cheap, never seeks),
+  /// straight to reopen for dead, breather before reconnecting, honest card
+  /// at the cap, 90s re-death backoff against throttling servers. Resets on
+  /// motion or manual zap. Zero allocation while healthy.
   Future<void> _piPollTick() async {
     if (_disposed || !_piMode) return;
     final s = _state;
@@ -531,8 +533,8 @@ class PlayerService extends ChangeNotifier {
     } catch (_) {
       return; // controller gone mid-check
     }
-    // Liveness probe + flow clock, in try/catch by design. A moving
-    // position is proof the pipeline flows.
+    // Liveness probes + flow clocks, in try/catch by design. A moving
+    // position OR a moving buffered-end each prove the pipeline flows.
     var dead = false;
     try {
       final pos = await c.position;
@@ -542,10 +544,24 @@ class PlayerService extends ChangeNotifier {
         _lastProgress = DateTime.now();
         _lastFlowAt = DateTime.now();
         _flowStrikes = 0;
+        _signalEverMoved = true;
       }
     } on PlatformException catch (e) {
       dead = true;
       debugPrint('Pi poll: pipeline dead ($e)');
+    } catch (_) {}
+    // Second flow signal: buffered-end advance. The tank pipeline's queue2
+    // reports real ranges; stock reports none. Either signal independently
+    // proves motion (and clears strikes).
+    try {
+      final end = _piBufferedEnd();
+      if (end > 0 && end - _lastBufferedEnd > 0.25) {
+        _lastBufferedEnd = end;
+        _lastProgress = DateTime.now();
+        _lastFlowAt = DateTime.now();
+        _flowStrikes = 0;
+        _signalEverMoved = true;
+      }
     } catch (_) {}
     if (!identical(_piCtrl, c) || s.playing?.id != ch.id) return;
     if (s.playError != null) return;
@@ -563,6 +579,10 @@ class PlayerService extends ChangeNotifier {
       _lastDeathAt = DateTime.now();
     } else {
       if (DateTime.now().difference(_lastFlowAt).inSeconds < 8) return;
+      if (!_signalEverMoved) return; // UNKNOWN, not frozen: this backend
+      // reports no moving signal during healthy playback — recovery here
+      // would murder a working stream (re-kicks interrupt motion, reopens
+      // hammer the server). Only proven DEATH recovers, above.
     }
     if (DateTime.now().difference(_lastRecoveryAt).inSeconds <
         (dead ? 5 : 15)) {
@@ -756,6 +776,8 @@ class PlayerService extends ChangeNotifier {
     _lastProgress = DateTime.now();
     _lastPosition = Duration.zero;
     _lastFlowAt = DateTime.now(); // fresh freeze clock per open
+    _lastBufferedEnd = 0; // fresh signal state per open
+    _signalEverMoved = false;
     // NOTE: _flowStrikes / _lastDeathAt deliberately NOT reset here — this
     // runs for auto-reopens too, and the ladder must survive them (it
     // resets on manual zaps in _syncWithState and on flow in _onPiUpdate).
@@ -813,13 +835,19 @@ class PlayerService extends ChangeNotifier {
         // Progress counts — the load watchdog must not fire mid-warmup.
         if (end > 0) _lastProgress = DateTime.now();
         // Reveal: first frame + recently-observed flow + dwell elapsed.
-        // (Backends that report ranges can additionally gate on end, but
-        // flow is the requirement — ranges alone don't prove motion.)
+        // Unknown-escape: if no signal has EVER moved, flow is unprovable
+        // on this backend — reveal on dwell+margin rather than holding the
+        // veil forever (proven death still errors via the poll + the
+        // backstop below).
         final flowing = DateTime.now()
                 .difference(_lastFlowAt)
                 .inSeconds <
             3;
-        if (s.hasVideo && flowing && elapsed >= dwell) {
+        final unknown = !_signalEverMoved;
+        final escapeAt = dwell < 8 ? 8 : dwell;
+        if (s.hasVideo &&
+            ((flowing && elapsed >= dwell) ||
+                (unknown && elapsed >= escapeAt))) {
           revealed = true;
           break;
         }
@@ -886,6 +914,8 @@ class PlayerService extends ChangeNotifier {
     _currentId = ch.id;
     _lastProgress = DateTime.now(); // fresh stall clock per channel
     _lastFlowAt = DateTime.now(); // fresh freeze clock per channel
+    _lastBufferedEnd = 0; // fresh signal state per channel
+    _signalEverMoved = false;
     if (!isAuto) {
       // Manual zap: reset the ladder + death memory. Auto-reopens preserve
       // both so a chronically dying stream still reaches the cap + backoff.
