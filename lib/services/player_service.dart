@@ -642,11 +642,15 @@ class PlayerService extends ChangeNotifier {
       final seq = _piSeq;
       // Failed pipelines skip re-kicks and jump to reopen; frozen ones
       // climb the ladder.
-      _flowStrikes += dead ? 3 : 1;
+      _flowStrikes += dead ? 4 : 1;
       _lastRecoveryAt = DateTime.now();
-      if (_flowStrikes <= 2) {
-        // Cheap raw re-kick: re-issue the state change with zero seeks.
-        // Fixes pipelines stuck between PAUSED preroll and PLAYING.
+      if (_flowStrikes <= 3) {
+        // Silent raw re-kick: re-issue the state change with zero seeks.
+        // Fixes pipelines stuck between PAUSED preroll and PLAYING, and
+        // rides out source hiccups. Silent by design (no UI flags touched):
+        // the bank keeps showing its footage while the source recovers
+        // underneath — errors surface at the cap, never for a recoverable
+        // stall.
         debugPrint('Pi poll: picture frozen, '
             're-kick #$_flowStrikes (${ch.name})');
         await _piPauseRaw(c);
@@ -657,10 +661,11 @@ class PlayerService extends ChangeNotifier {
         if (!identical(_piCtrl, c)) return;
         await _piPlayRaw(c);
         _lastFlowAt = DateTime.now();
-      } else if (_flowStrikes <= 4) {
-        // Fresh pipeline at the live edge — the only cure for a failed or
-        // wedged Bin. Breather first when dead: the server just watched a
-        // pipeline die. Same single path as a manual retry — old controller
+      } else if (_flowStrikes <= 5) {
+        // Fresh pipeline at the live edge — last resort before the card.
+        // (Reopening drops the bank, so re-kicks always go first.)
+        // Breather first when dead: the server just watched a pipeline
+        // die. Same single path as a manual retry — old controller
         // disposed first, so no stacking, no audio leak, no memory growth.
         if (dead) {
           await Future.delayed(const Duration(seconds: 5));
@@ -856,14 +861,45 @@ class PlayerService extends ChangeNotifier {
     s.setHasVideo(
         ctrl.value.size.width > 0 && ctrl.value.size.height > 0);
 
-    // LIVE-SAFE START: play immediately, never hold a live HLS pipeline
-    // paused. A paused-then-resumed live pipeline restarts behind the live
-    // edge — if those segments slid out of the playlist window the demuxer
-    // wedges (plays ~one segment / 3-4s, then freezes; long holds error
-    // outright). The OVERLAY does the waiting instead: it clears on first
-    // frame + observed flow + a short dwell, so the reveal is stable but
-    // the pipeline never goes stale. (Desktop mpv keeps its paused tank —
-    // mpv's cache handles live-resume correctly.)
+    // PAUSED TANK, single order: source → tank → screen. With N>0 the
+    // pipeline is held paused right after init and banks N seconds BEFORE
+    // first play — ranges≥N when observable (tank path), else wall time (a
+    // live origin streams ~1x realtime, so held seconds ≈ banked seconds).
+    // N=0 skips straight to play. Raw pause/play throughout — never a seek
+    // — so resume can't wedge like controller.play()'s implicit seekTo(0)
+    // did. (Desktop mpv tanks the same way via its cache; this is the Pi
+    // equivalent.)
+    try {
+      await _piPauseRaw(ctrl); // idempotent: native starts paused anyway
+    } catch (_) {}
+    if (n > 0) {
+      // Fill phase: the veil shows "Filling tank… Xs/Ns" while footage
+      // banks behind it. Nothing plays, nothing can go stale mid-frame.
+      s.setPrebuffering(true, 0, n);
+      final target = n.toDouble();
+      final t0 = DateTime.now();
+      var lastPush = -1.0;
+      while (true) {
+        if (seq != _piSeq || _disposed) return;
+        if (s.playing?.id != ch.id || s.playError != null) return;
+        final elapsed = DateTime.now().difference(t0).inSeconds;
+        final end = _piBufferedEnd();
+        // Progress: measured ranges when reported, else wall proxy (live
+        // ≈1x realtime). Either way the bar tracks the bank honestly.
+        final shown = end > 0 ? end : elapsed.clamp(0, n).toDouble();
+        if ((shown - lastPush).abs() >= 0.5) {
+          lastPush = shown;
+          s.setPrebufferProgress(shown);
+        }
+        if (end > 0) _lastProgress = DateTime.now();
+        if (end >= target || elapsed >= n) break; // bank full
+        await Future.delayed(const Duration(milliseconds: 250));
+      }
+      if (seq != _piSeq || _disposed) return;
+      if (s.playing?.id != ch.id || s.playError != null) return;
+      // NOTE: prebuffering stays TRUE into play — the reveal gate below
+      // turns it off. One continuous veil: filling → warming → chrome.
+    }
     try {
       await ctrl.setVolume(s.muted ? 0 : s.volume.clamp(0.0, 1.0));
     } catch (_) {}
@@ -884,10 +920,10 @@ class PlayerService extends ChangeNotifier {
     s.setBuffering(false);
 
     if (n > 0) {
-      // Reveal gate (was: paused tank). Same overlay UX — "Filling tank…
-      // Xs/Ns" — but the picture warms up behind the veil instead of the
-      // pipeline sitting paused. Clears on flow; the N+20s backstop with no
-      // observed flow becomes an error, never a dead-frame reveal.
+      // Warmup reveal: the tank just banked N seconds and the picture is
+      // now playing behind the veil. Lift it on first frame + observed flow
+      // + short dwell; the N+20s backstop with no observed flow becomes an
+      // error, never a dead-frame reveal. (N=0 takes no gate at all.)
       s.setPrebuffering(true, 0, n);
       // Brief warmup flash, not a wait: the bank keeps working invisibly
       // after reveal (queue2), so the veil only needs first-frame + flow
