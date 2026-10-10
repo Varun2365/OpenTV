@@ -507,6 +507,7 @@ class AppState extends ChangeNotifier {
     _armInfoTimer();
     playerBtnIndex = 0;
     playerFocusVisible = false; // Cancel starts unfocused; Down focuses it
+    playerListOpen = false; // zapping / OK-play always drops the list
     _pushRecent(ch);
     notifyListeners();
   }
@@ -523,6 +524,7 @@ class AppState extends ChangeNotifier {
     prebufferedSec = 0;
     infoVisible = false;
     _infoTimer?.cancel();
+    playerListOpen = false;
     notifyListeners();
   }
 
@@ -741,6 +743,39 @@ class AppState extends ChangeNotifier {
       notifyListeners();
       return;
     }
+    // TV player-list sidebar eats up/down/OK/back while settled, so
+    // the phone + TV D-pad walk the list instead of the hidden grid.
+    // Volume/CH keys fall through. Overlay (loading/error) keeps
+    // priority — the list only intercepts when nothing covers the video.
+    if (playing != null &&
+        playerListOpen &&
+        playerActionCount == 0) {
+      switch (key) {
+        case RemoteKey.up:
+          movePlayerList(-1);
+          _keyCtrl.add(key);
+          return;
+        case RemoteKey.down:
+          movePlayerList(1);
+          _keyCtrl.add(key);
+          return;
+        case RemoteKey.ok:
+          confirmPlayerList();
+          _keyCtrl.add(key);
+          return;
+        case RemoteKey.back:
+        case RemoteKey.left:
+          closePlayerList();
+          _keyCtrl.add(key);
+          return;
+        case RemoteKey.home:
+          stop();
+          _keyCtrl.add(key);
+          return;
+        default:
+          break;
+      }
+    }
     // On the player, Back/Home exit to home. (Without this they fall
     // into grid-zone moves that are invisible behind the video, so the
     // remote's Back/Home look dead while watching.)
@@ -812,6 +847,85 @@ class AppState extends ChangeNotifier {
       }
     }
     return 'All channels';
+  }
+
+  // TV player-list sidebar (phone remote opens it while watching).
+  // Selection starts on the playing channel; up/down moves, OK plays
+  // the selection and closes. Transparent list overlay in PlayerScreen.
+  bool playerListOpen = false;
+  int playerListIndex = 0;
+
+  void _clampPlayerListIndex() {
+    final list = playerListChannels;
+    if (list.isEmpty) {
+      playerListIndex = 0;
+    } else {
+      playerListIndex =
+          playerListIndex.clamp(0, list.length - 1);
+    }
+  }
+
+  void openPlayerList() {
+    if (playing == null || playerActionCount > 0) return;
+    final list = playerListChannels;
+    if (list.isEmpty) return;
+    final pid = playing!.id;
+    var idx = 0;
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].id == pid) {
+        idx = i;
+        break;
+      }
+    }
+    playerListIndex = idx;
+    playerListOpen = true;
+    notifyListeners();
+  }
+
+  void closePlayerList() {
+    if (!playerListOpen) return;
+    playerListOpen = false;
+    notifyListeners();
+  }
+
+  void togglePlayerList() {
+    if (playerListOpen) {
+      closePlayerList();
+    } else {
+      openPlayerList();
+    }
+  }
+
+  void movePlayerList(int dir) {
+    final list = playerListChannels;
+    if (list.isEmpty) return;
+    // Dart % stays non-negative, so this wraps both directions.
+    playerListIndex =
+        ((playerListIndex + dir) % list.length).clamp(0, list.length - 1);
+    notifyListeners();
+  }
+
+  void confirmPlayerList() {
+    final list = playerListChannels;
+    if (list.isEmpty) {
+      playerListOpen = false;
+      notifyListeners();
+      return;
+    }
+    _clampPlayerListIndex();
+    final sel = list[playerListIndex];
+    playerListOpen = false;
+    play(sel);
+  }
+
+  /// Tap a row directly: select it, then play + close.
+  void tapPlayerList(int i) {
+    final list = playerListChannels;
+    if (list.isEmpty) return;
+    playerListIndex = i.clamp(0, list.length - 1);
+    final sel = list[playerListIndex];
+    playerListOpen = false;
+    play(sel);
   }
 
   void _applyFocusMove(RemoteKey key) {

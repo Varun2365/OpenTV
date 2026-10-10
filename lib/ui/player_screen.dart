@@ -29,6 +29,11 @@ class PlayerScreen extends StatefulWidget {
 class _PlayerScreenState extends State<PlayerScreen> {
   Timer? _tick;
   StreamSubscription<RemoteKey>? _keySub;
+  // Player-list sidebar: fixed row height so selection scroll is exact.
+  final ScrollController _plistCtrl = ScrollController();
+  static const double _plistRowH = 68;
+  int _lastPlistSel = -1;
+  bool _lastPlistOpen = false;
 
   bool get _loading {
     final s = widget.state;
@@ -79,6 +84,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
   void dispose() {
     _tick?.cancel();
     _keySub?.cancel();
+    _plistCtrl.dispose();
     widget.state.removeListener(_onState);
     super.dispose();
   }
@@ -120,10 +126,46 @@ class _PlayerScreenState extends State<PlayerScreen> {
         s.playError == null &&
         !_loading;
 
+    // Player-list sidebar scroll: land on the playing channel when it
+    // opens, then follow up/down selection. Deferred past build so the
+    // controller jump never marks a widget dirty mid-build.
+    final plistOpen = s.playerListOpen && ch != null;
+    if (plistOpen) {
+      final list = s.playerListChannels;
+      final sel =
+          list.isEmpty ? 0 : s.playerListIndex.clamp(0, list.length - 1);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || !_plistCtrl.hasClients || list.isEmpty) return;
+        if (_lastPlistOpen && _lastPlistSel == sel) return;
+        _lastPlistOpen = true;
+        _lastPlistSel = sel;
+        final max = _plistCtrl.position.maxScrollExtent;
+        final target =
+            (sel * _plistRowH - 240).clamp(0.0, max);
+        if ((target - _plistCtrl.offset).abs() < 1) return;
+        try {
+          _plistCtrl.animateTo(target,
+              duration: const Duration(milliseconds: 220),
+              curve: Curves.easeOutCubic);
+        } catch (_) {}
+      });
+    } else {
+      _lastPlistOpen = false;
+      _lastPlistSel = -1;
+    }
+
     return Scaffold(
       backgroundColor: Colors.black,
       body: GestureDetector(
-        onTap: () => widget.state.toggleInfo(),
+        // Scrim tap while the list is open closes it (rows play on tap).
+        onTap: () {
+          final st = widget.state;
+          if (st.playerListOpen) {
+            st.closePlayerList();
+          } else {
+            st.toggleInfo();
+          }
+        },
         child: Stack(
           fit: StackFit.expand,
           children: [
@@ -804,7 +846,210 @@ class _PlayerScreenState extends State<PlayerScreen> {
                 ),
               ),
             ),
+            // Player-list sidebar (phone "Channels" button): dim scrim +
+            // kinda-transparent right list. Rows play on tap; ▲▼ + OK on
+            // the TV / phone D-pad walk the list via AppState.
+            if (plistOpen) _playerListOverlay(s),
           ],
+        ),
+      ),
+    );
+  }
+
+  /// Right-side channel list for the current rail. Semi-transparent so
+  /// the video stays faintly visible; the selection row glows gold.
+  Widget _playerListOverlay(AppState s) {
+    final list = s.playerListChannels;
+    final sel =
+        list.isEmpty ? 0 : s.playerListIndex.clamp(0, list.length - 1);
+    final playingId = s.playing?.id;
+    return Positioned.fill(
+      child: Row(
+        children: [
+          // Dim the video on the left; the outer GestureDetector tap
+          // closes the list.
+          Expanded(
+            child: Container(color: const Color(0x88000000)),
+          ),
+          Container(
+            width: 400,
+            color: const Color(0xD2101016),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 26, 12, 12),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment:
+                              CrossAxisAlignment.start,
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(s.playerListTitle,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 20,
+                                    fontWeight: FontWeight.w800)),
+                            const SizedBox(height: 4),
+                            Text('${list.length} channels • this list',
+                                style: const TextStyle(
+                                    color: Color(0xFF9A94A6),
+                                    fontSize: 12)),
+                          ],
+                        ),
+                      ),
+                      IconButton(
+                        onPressed: () => s.closePlayerList(),
+                        icon: const Icon(Icons.close_rounded,
+                            color: Color(0xFFF5F1E8)),
+                        tooltip: 'Close',
+                      ),
+                    ],
+                  ),
+                ),
+                const Divider(
+                    height: 1, color: Color(0x22FFFFFF)),
+                Expanded(
+                  child: list.isEmpty
+                      ? const Center(
+                          child: Text('Nothing in this list.',
+                              style: TextStyle(
+                                  color: Color(0xFF9A94A6),
+                                  fontSize: 14)),
+                        )
+                      : ListView.builder(
+                          controller: _plistCtrl,
+                          itemExtent: _plistRowH,
+                          itemCount: list.length,
+                          itemBuilder: (context, i) {
+                            final c = list[i];
+                            final isSel = i == sel;
+                            final isPlaying =
+                                c.id == playingId;
+                            return _plistRow(s, c, i,
+                                isSel: isSel,
+                                isPlaying: isPlaying);
+                          },
+                        ),
+                ),
+                const Divider(
+                    height: 1, color: Color(0x22FFFFFF)),
+                const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 12),
+                  child: Text('▲ ▼ MOVE  •  OK PLAY',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                          color: Color(0xFF6E6A7E),
+                          fontSize: 12,
+                          letterSpacing: 2,
+                          fontWeight: FontWeight.w600)),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _plistRow(AppState s, TvChannel c, int index,
+      {required bool isSel, required bool isPlaying}) {
+    final health = s.healthById[c.id];
+    final dot = health == 'fast'
+        ? const Color(0xFF3DDC84)
+        : health == 'slow'
+            ? const Color(0xFFFFB338)
+            : health == 'dead'
+                ? const Color(0xFFFF5A5A)
+                : const Color(0xFF4A4A54);
+    return Material(
+      color: isSel
+          ? const Color(0x22FFB338)
+          : Colors.transparent,
+      child: InkWell(
+        onTap: () => s.tapPlayerList(index),
+        child: Container(
+          height: _plistRowH,
+          padding:
+              const EdgeInsets.symmetric(horizontal: 16),
+          decoration: BoxDecoration(
+            border: Border(
+              left: BorderSide(
+                  color: isSel
+                      ? _gold
+                      : Colors.transparent,
+                  width: 3),
+              bottom: const BorderSide(
+                  color: Color(0x14FFFFFF)),
+            ),
+          ),
+          child: Row(
+            children: [
+              Container(
+                width: 8,
+                height: 8,
+                decoration: BoxDecoration(
+                    color: dot, shape: BoxShape.circle),
+              ),
+              const SizedBox(width: 12),
+              Container(
+                width: 44,
+                height: 44,
+                decoration: BoxDecoration(
+                    color: const Color(0xFF1B1B24),
+                    borderRadius: BorderRadius.circular(11),
+                    border: Border.all(
+                        color: const Color(0x33FFFFFF))),
+                clipBehavior: Clip.antiAlias,
+                child: c.logoUrl.isNotEmpty
+                    ? Image.network(c.logoUrl,
+                        fit: BoxFit.cover,
+                        errorBuilder: (_, err, stack) =>
+                            const HeroIcon(HeroIcons.tv,
+                                color: Color(0xFFFFB338),
+                                size: 22))
+                    : const HeroIcon(HeroIcons.tv,
+                        color: Color(0xFFFFB338), size: 22),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  crossAxisAlignment:
+                      CrossAxisAlignment.start,
+                  children: [
+                    Text(c.name,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                            color: isSel
+                                ? _gold
+                                : Colors.white,
+                            fontSize: 15,
+                            fontWeight: FontWeight.w700)),
+                    const SizedBox(height: 2),
+                    Text(
+                        isPlaying
+                            ? '● PLAYING'
+                            : c.category.toUpperCase(),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                            color: isPlaying
+                                ? const Color(0xFF3DDC84)
+                                : const Color(0xFF9A94A6),
+                            fontSize: 11,
+                            letterSpacing: 1.2,
+                            fontWeight: FontWeight.w700)),
+                  ],
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
