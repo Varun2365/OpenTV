@@ -105,6 +105,12 @@ class AppState extends ChangeNotifier {
   int gridIndex = 0; // flat index into the selected category
   int gridColumns = 6; // set by layout (MediaQuery) each build
 
+  // Exact home-grid pixel offset. TvHome is unmounted while the player
+  // is up (so its ScrollController dies with it) — the home screen
+  // saves here continuously and restores on return, landing on the
+  // exact pixels, selection and sidebar where playback started.
+  double homeScrollOffset = 0;
+
   // Per-category cursor memory (keyed by 'fav'/rail title so it survives
   // list inserts) + hold-glide speed for the phone remote (keys/sec).
   final Map<String, int> _sideCursors = {};
@@ -367,6 +373,48 @@ class AppState extends ChangeNotifier {
         customPlaylists.where((e) => e.id != id).toList();
     _rebuild();
     notifyListeners();
+  }
+
+  // Rail key ('★ name') just reordered from the phone remote — the TV
+  // sidebar flashes it once, then the flag self-clears.
+  String? lastMovedRailKey;
+  Timer? _movedTimer;
+
+  /// Reorder user lists to [ids] order (unknown ids ignored, missing
+  /// lists keep their relative tail). Sidebar order follows instantly;
+  /// persistence is the caller's job (server saves after this).
+  void reorderCustomPlaylists(List<String> ids,
+      {String? movedId}) {
+    final byId = {
+      for (final p in customPlaylists) p.id: p
+    };
+    final seen = <String>{};
+    final next = <CustomPlaylist>[];
+    for (final id in ids) {
+      final p = byId[id];
+      if (p != null && seen.add(id)) next.add(p);
+    }
+    for (final p in customPlaylists) {
+      if (seen.add(p.id)) next.add(p);
+    }
+    customPlaylists = next;
+    _rebuild();
+    // Keep the sidebar selection on a live item.
+    sideIndex = sideIndex.clamp(0, sideItems.length - 1);
+    _restoreSideCursor();
+    final moved = movedId == null ? null : byId[movedId];
+    lastMovedRailKey =
+        moved == null ? null : '★ ${moved.name}';
+    notifyListeners();
+    _movedTimer?.cancel();
+    if (lastMovedRailKey != null) {
+      _movedTimer = Timer(
+          const Duration(milliseconds: 1400), () {
+        if (_dead) return;
+        lastMovedRailKey = null;
+        notifyListeners();
+      });
+    }
   }
 
   void _rebuild() {
@@ -792,6 +840,7 @@ class AppState extends ChangeNotifier {
   void dispose() {
     _dead = true;
     _infoTimer?.cancel();
+    _movedTimer?.cancel();
     _keyCtrl.close();
     super.dispose();
   }

@@ -56,6 +56,10 @@ class _TvHomeState extends State<TvHome> {
   void initState() {
     super.initState();
     widget.state.addListener(_onState);
+    // Persist the exact grid pixels continuously: this widget is
+    // unmounted while the player is up, so Back lands on the same
+    // scroll amount, selection and sidebar as at play time.
+    _gridCtrl.addListener(_saveHomeScroll);
     // Precache the photo backdrop so it never pops in late.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       try {
@@ -64,12 +68,28 @@ class _TvHomeState extends State<TvHome> {
       } catch (_) {}
       _focusNode.requestFocus();
       _firstFrame = false;
-      _scrollToFocused(animated: false);
+      final saved = widget.state.homeScrollOffset;
+      if (saved > 0 && _gridCtrl.hasClients) {
+        try {
+          final max = _gridCtrl.position.maxScrollExtent;
+          _gridCtrl.jumpTo(saved.clamp(0, max));
+        } catch (_) {}
+      } else {
+        _scrollToFocused(animated: false);
+      }
     });
+  }
+
+  void _saveHomeScroll() {
+    if (_gridCtrl.hasClients) {
+      widget.state.homeScrollOffset = _gridCtrl.offset;
+    }
   }
 
   @override
   void dispose() {
+    _saveHomeScroll();
+    _gridCtrl.removeListener(_saveHomeScroll);
     widget.state.removeListener(_onState);
     _gridCtrl.dispose();
     _focusNode.dispose();
@@ -502,6 +522,13 @@ class _TvHomeState extends State<TvHome> {
                         : (focused
                             ? _kAccent
                             : _kPaper));
+                // Just reordered from the phone remote: flash gold once
+                // (AppState self-clears the flag; AnimatedContainer
+                // eases both in and out).
+                final moved =
+                    s.lastMovedRailKey != null &&
+                        s.lastMovedRailKey ==
+                            items[i].key;
                 return Padding(
                   padding: const EdgeInsets.only(
                       bottom: 4),
@@ -515,11 +542,20 @@ class _TvHomeState extends State<TvHome> {
                               horizontal: 12,
                               vertical: 13),
                       decoration: BoxDecoration(
-                        color: active
-                            ? const Color(0xFF1B1B22)
-                            : Colors.transparent,
+                        color: moved
+                            ? const Color(0x33FFB338)
+                            : active
+                                ? const Color(
+                                    0xFF1B1B22)
+                                : Colors.transparent,
                         borderRadius:
                             BorderRadius.circular(4),
+                        border: moved
+                            ? Border.all(
+                                color: const Color(
+                                    0xFFFFB338),
+                                width: 1.5)
+                            : null,
                       ),
                       child: Row(
                         children: [
