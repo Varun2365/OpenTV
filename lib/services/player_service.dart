@@ -88,6 +88,10 @@ class PlayerService extends ChangeNotifier {
   Timer? _piPollTimer;
   DateTime _lastFlowAt = DateTime.now();
   double _lastBufferedEnd = 0;
+  // True once buffered ranges have EVER been observed (>0) on the current
+  // pipeline. Gates the rebuffer driver: without observed ranges there is
+  // no honest stall signal, so the flag is never touched.
+  bool _bufferedSeen = false;
   // True once ANY flow signal (position or buffered-end) has moved on the
   // current pipeline. Until then the stream is UNKNOWN, never frozen: some
   // backends report neither signal during healthy playback, and punishing
@@ -107,6 +111,11 @@ class PlayerService extends ChangeNotifier {
   bool _autoReopen = false;
   // The ladder contains awaits (breather delay); never run two at once.
   bool _flowBusy = false;
+  // Channels whose tank pipeline already failed init this session. Their
+  // retunes go stock directly — a repeat 10s doomed wait on every zap is
+  // hectic UX for zero information. Bounded; session-scoped (a slow origin
+  // may succeed later, and stock plays meanwhile anyway).
+  final Set<String> _tankSkipIds = {};
   bool _disposed = false;
 
   Future<void> init(AppState state) async {
@@ -469,15 +478,17 @@ class PlayerService extends ChangeNotifier {
     if (v.size.width > 0 && v.size.height > 0) {
       s.setHasVideo(true);
     }
-    // Buffering + playing flags drive the overlay / pill.
-    final wasBuffering = s.isBuffering;
-    s.setBuffering(v.isBuffering);
+    // Buffering flag: deliberately NOT mirrored from v.isBuffering. The
+    // native side only emits buffering events its query can answer — for
+    // these pipelines that's never (stuck false) or stale (stuck true once
+    // set at tune). Mirroring it is what latched the indicator on forever.
+    // isBuffering is owned solely by the poll's ranges-stall driver below
+    // (real data, tank path) plus AppState.play at tune start — exactly the
+    // earlier-version mpv semantics: veil while loading, veil on real stall,
+    // chrome otherwise.
     if (v.isPlaying != s.isPlaying) s.setPlayingFlag(v.isPlaying);
-    if (v.isPlaying || !v.isBuffering) {
+    if (v.isPlaying) {
       _lastProgress = DateTime.now();
-    } else if (!wasBuffering && v.isBuffering) {
-      // entered buffering — keep old progress clock (watchdog measures
-      // dry time), don't reset.
     }
     // NOTE: position tracking lives in _piPollTick (our own 2s poll), not
     // here — without controller.play() there are no position events, and
@@ -555,16 +566,34 @@ class PlayerService extends ChangeNotifier {
     // proves motion (and clears strikes).
     try {
       final end = _piBufferedEnd();
-      if (end > 0 && end - _lastBufferedEnd > 0.25) {
-        _lastBufferedEnd = end;
-        _lastProgress = DateTime.now();
-        _lastFlowAt = DateTime.now();
-        _flowStrikes = 0;
-        _signalEverMoved = true;
+      if (end > 0) {
+        _bufferedSeen = true;
+        if (end - _lastBufferedEnd > 0.25) {
+          _lastBufferedEnd = end;
+          _lastProgress = DateTime.now();
+          _lastFlowAt = DateTime.now();
+          _flowStrikes = 0;
+          _signalEverMoved = true;
+        }
       }
     } catch (_) {}
     if (!identical(_piCtrl, c) || s.playing?.id != ch.id) return;
     if (s.playError != null) return;
+    // Rebuffer driver: mpv semantics on real data only. With reported
+    // ranges, a bank that stops growing while settled + playing is a genuine
+    // stall → veil (exactly like an mpv rebuffer); growth or motion clears
+    // it. Hysteresis — set at 5s dry, clear under 3s — so no flicker.
+    // Unknown streams (no ranges ever seen) never touch the flag: no honest
+    // signal, no indicator. Change-only calls (setBuffering notifies
+    // unconditionally).
+    if (!s.prebuffering && _bufferedSeen) {
+      final drySec = DateTime.now().difference(_lastFlowAt).inSeconds;
+      if (drySec >= 5) {
+        if (!s.isBuffering) s.setBuffering(true);
+      } else if (drySec < 3) {
+        if (s.isBuffering) s.setBuffering(false);
+      }
+    }
     if (dead) {
       try {
         await _piPauseRaw(c);
@@ -666,6 +695,30 @@ class PlayerService extends ChangeNotifier {
     return '$head ! decodebin ! videoconvert ! appsink name=sink sync=true';
   }
 
+  /// Attaches [next] as the live Pi controller and initializes it with a
+  /// fail-fast timeout. Returns null on success, the error on failure (the
+  /// controller is fully disposed and _piCtrl cleared in that case, so the
+  /// caller can try the next pipeline path with zero leaks).
+  Future<Object?> _piAttachInit(
+      VideoPlayerController next, int timeoutSecs) async {
+    _piCtrl = next;
+    next.addListener(_onPiUpdate);
+    notifyListeners();
+    try {
+      await next.initialize().timeout(Duration(seconds: timeoutSecs));
+      return null;
+    } catch (e) {
+      try {
+        next.removeListener(_onPiUpdate);
+      } catch (_) {}
+      try {
+        await next.dispose();
+      } catch (_) {}
+      if (identical(_piCtrl, next)) _piCtrl = null;
+      return e;
+    }
+  }
+
   Future<void> _openPiChannel(TvChannel ch, int seq) async {
     final s = _state;
     if (s == null) return;
@@ -691,44 +744,38 @@ class PlayerService extends ChangeNotifier {
     // decoder. Scales with the user's tank setting, bounded so one channel
     // never dedicates silly RAM (~2-8 Mbps → 15s ≈ 4-15MB, 60s ≈ 60MB max).
     final bankSecs = (n * 4).clamp(15, 60);
-    VideoPlayerController ctrl;
+    VideoPlayerController? ctrl;
     var tankPath = false;
-    // Attempt 1: tank pipeline (explicit bank + observable ranges).
-    // Attempt 2 (on failure): stock uridecodebin path (proven to play).
-    // Per-channel fallback — a chain the decoder dislikes degrades
-    // gracefully instead of killing the tune.
-    try {
-      debugPrint(
-          'Pi open: tank pipeline (${ch.name}, bank=${bankSecs}s)');
-      ctrl = FlutterpiVideoPlayerController.withGstreamerPipeline(
-        _piTankPipeline(ch.streamUrl, bankSecs),
-        formatHint:
-            _isHlsUrl(ch.streamUrl) ? VideoFormat.hls : null,
-        videoPlayerOptions: VideoPlayerOptions(mixWithOthers: false),
-      );
-      tankPath = true;
-      _piCtrl = ctrl;
-      ctrl.addListener(_onPiUpdate);
-      notifyListeners();
-      await ctrl.initialize().timeout(const Duration(seconds: 15));
-    } catch (e) {
+    // Attempt 1: tank pipeline (explicit bank + observable ranges) — unless
+    // it already failed this channel this session (then stock directly: a
+    // repeat doomed wait on every zap is hectic UX for zero information).
+    // Fail-fast (10s): if queue2 can't fill even its low-percent threshold
+    // by then, the origin is too slow for banking and stock (plays whatever
+    // arrives, no hold) is the better UX.
+    if (_tankSkipIds.contains(ch.id)) {
+      debugPrint('Pi open: stock path, tank skipped after earlier '
+          'failure (${ch.name})');
+    } else {
+      try {
+        debugPrint(
+            'Pi open: tank pipeline (${ch.name}, bank=${bankSecs}s)');
+        final next = FlutterpiVideoPlayerController.withGstreamerPipeline(
+          _piTankPipeline(ch.streamUrl, bankSecs),
+          formatHint:
+              _isHlsUrl(ch.streamUrl) ? VideoFormat.hls : null,
+          videoPlayerOptions: VideoPlayerOptions(mixWithOthers: false),
+        );
+        tankPath = true;
+        final err = await _piAttachInit(next, 10);
+        if (err != null) throw err;
+        ctrl = next;
+      } catch (e) {
       debugPrint('Pi tank pipeline failed (${ch.name}): $e — '
           'falling back to stock path');
-      final failed = _piCtrl;
-      if (failed != null) {
-        try {
-          failed.removeListener(_onPiUpdate);
-        } catch (_) {}
-        try {
-          await failed.dispose();
-        } catch (_) {}
-        if (identical(_piCtrl, failed)) _piCtrl = null;
-      }
+      // (helper already disposed + cleared _piCtrl on failure)
       tankPath = false;
-      if (seq != _piSeq || _disposed) return;
-      if (s.playing?.id != ch.id || s.playError != null) return;
       // Missing native plugin fails BOTH paths identically — say so once
-      // instead of running the stock attempt into the same wall.
+      // instead of running stock into the same wall.
       if (e is MissingPluginException ||
           '$e'.contains('gstreamerVideoPlayer')) {
         notifyListeners();
@@ -736,29 +783,32 @@ class PlayerService extends ChangeNotifier {
             'This flutter-pi has no video plugin — rebuild flutter-pi with gstreamer support, then restart the app.');
         return;
       }
+      // Remember: no repeat doomed waits for this channel this session.
+      _tankSkipIds.add(ch.id);
+      while (_tankSkipIds.length > 100) {
+        _tankSkipIds.remove(_tankSkipIds.first);
+      }
+      }
+    }
+    // Attempt 2 (only when attempt 1 didn't produce a controller): stock
+    // uridecodebin path (proven to play). Per-channel fallback degrades
+    // gracefully instead of killing the tune.
+    if (ctrl == null) {
+      if (seq != _piSeq || _disposed) return;
+      if (s.playing?.id != ch.id || s.playError != null) return;
       try {
         debugPrint('Pi open: stock path (${ch.name})');
-        ctrl = VideoPlayerController.networkUrl(
+        final next = VideoPlayerController.networkUrl(
           Uri.parse(ch.streamUrl),
           formatHint:
               _isHlsUrl(ch.streamUrl) ? VideoFormat.hls : null,
           videoPlayerOptions: VideoPlayerOptions(mixWithOthers: false),
         );
-        _piCtrl = ctrl;
-        ctrl.addListener(_onPiUpdate);
-        notifyListeners();
-        await ctrl.initialize().timeout(const Duration(seconds: 25));
+        final err = await _piAttachInit(next, 25);
+        if (err != null) throw err;
+        ctrl = next;
       } catch (e2) {
-        final failed2 = _piCtrl;
-        if (failed2 != null) {
-          try {
-            failed2.removeListener(_onPiUpdate);
-          } catch (_) {}
-          try {
-            await failed2.dispose();
-          } catch (_) {}
-          if (identical(_piCtrl, failed2)) _piCtrl = null;
-        }
+        // (helper already disposed + cleared _piCtrl on failure)
         if (seq != _piSeq || _disposed) return;
         notifyListeners();
         debugPrint(
@@ -777,6 +827,7 @@ class PlayerService extends ChangeNotifier {
     _lastPosition = Duration.zero;
     _lastFlowAt = DateTime.now(); // fresh freeze clock per open
     _lastBufferedEnd = 0; // fresh signal state per open
+    _bufferedSeen = false;
     _signalEverMoved = false;
     // NOTE: _flowStrikes / _lastDeathAt deliberately NOT reset here — this
     // runs for auto-reopens too, and the ladder must survive them (it
@@ -811,7 +862,11 @@ class PlayerService extends ChangeNotifier {
       // pipeline sitting paused. Clears on flow; the N+20s backstop with no
       // observed flow becomes an error, never a dead-frame reveal.
       s.setPrebuffering(true, 0, n);
-      final dwell = n.clamp(0, 6); // live can't bank: long waits go stale
+      // Brief warmup flash, not a wait: the bank keeps working invisibly
+      // after reveal (queue2), so the veil only needs first-frame + flow
+      // confirmation, not the full N. Long veils on live streams read as
+      // "stuck buffering" and invite retries that throttle the server.
+      final dwell = n.clamp(0, 2);
       final deadline = playAt.add(Duration(seconds: n + 20));
       var lastPush = -1.0;
       var revealed = false;
@@ -844,7 +899,7 @@ class PlayerService extends ChangeNotifier {
                 .inSeconds <
             3;
         final unknown = !_signalEverMoved;
-        final escapeAt = dwell < 8 ? 8 : dwell;
+        final escapeAt = dwell < 4 ? 4 : dwell;
         if (s.hasVideo &&
             ((flowing && elapsed >= dwell) ||
                 (unknown && elapsed >= escapeAt))) {
@@ -857,6 +912,10 @@ class PlayerService extends ChangeNotifier {
       if (seq != _piSeq || _disposed) return;
       if (s.playing?.id != ch.id || s.playError != null) return;
       s.setPrebuffering(false);
+      // Tune-start buffering flag served its purpose (veil during open);
+      // the rebuffer driver owns it from here. Without this clear, the
+      // removed native mirror would leave the veil latched forever.
+      if (revealed) s.setBuffering(false);
       if (!revealed) {
         // Backstop hit with no observed flow — surface it instead of
         // lifting the veil onto a dead frame. The freeze watchdog below
@@ -915,6 +974,7 @@ class PlayerService extends ChangeNotifier {
     _lastProgress = DateTime.now(); // fresh stall clock per channel
     _lastFlowAt = DateTime.now(); // fresh freeze clock per channel
     _lastBufferedEnd = 0; // fresh signal state per channel
+    _bufferedSeen = false;
     _signalEverMoved = false;
     if (!isAuto) {
       // Manual zap: reset the ladder + death memory. Auto-reopens preserve

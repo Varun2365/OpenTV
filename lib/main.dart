@@ -13,7 +13,6 @@ import 'services/custom_playlist_store.dart';
 import 'services/local_remote_server.dart';
 import 'services/pi_detector.dart';
 import 'services/player_service.dart';
-import 'services/stream_health.dart';
 import 'ui/player_screen.dart';
 import 'ui/tv_home.dart';
 
@@ -57,13 +56,21 @@ Future<void> main() async {
           ? 'No network — showing saved picks'
           : '${channels.length} free channels ready');
 
-  // Fast streams first: cached health applies instantly, then a
-  // background parallel probe re-scores everything and re-sorts once.
-  state.applyHealth(
-      await StreamHealth.cachedHealth(state.allChannels));
-  StreamHealth.probeChannels(state.allChannels)
-      .then(state.applyHealth)
-      .catchError((_) {});
+  // Stream-health probing DISABLED (was: cached apply + 12-way concurrent
+  // background probe of every origin). Reason: probes open real connections
+  // to the same servers playback uses — on throttling panel origins those
+  // extra sockets read as abuse and get the playback connection throttled /
+  // blocked, and on the Pi they contend for bandwidth mid-tune-in. Channels
+  // dying right after working fits that signature. Dots stay neutral grey
+  // ('unknown'), rails keep catalog (name) order. Re-enable only with a
+  // gentler prober (sequential, off-peak, player-aware) — see
+  // StreamHealth.enabled.
+  //
+  // state.applyHealth(
+  //     await StreamHealth.cachedHealth(state.allChannels));
+  // StreamHealth.probeChannels(state.allChannels)
+  //     .then(state.applyHealth)
+  //     .catchError((_) {});
 
   // Background heal: refetch pasted lists so lists saved under the old
   // 300-channel cap (or with dead links) refresh to their full contents.

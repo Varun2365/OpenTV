@@ -12,6 +12,12 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../models/tv_channel.dart';
 
 class StreamHealth {
+  /// Master switch. OFF = no origin gets any probe traffic, ever — both
+  /// entry points return empty immediately. Turned off because concurrent
+  /// probes contend with playback on throttling origins (channels dying
+  /// after working) and on Pi bandwidth. Dots read neutral grey, rails keep
+  /// catalog order. See main.dart.
+  static const enabled = false;
   static const _key = 'opentv_health_v1';
   static const ttl = Duration(hours: 24);
   static const concurrency = 12;
@@ -42,6 +48,7 @@ class StreamHealth {
   /// Health for [channels] from cache (fresh entries only, else 'unknown').
   static Future<Map<String, String>> cachedHealth(
       List<TvChannel> channels) async {
+    if (!enabled) return {};
     try {
       final prefs = await SharedPreferences.getInstance();
       final raw = prefs.getString(_key);
@@ -68,6 +75,7 @@ class StreamHealth {
   /// Never throws — failures score 'dead'.
   static Future<Map<String, String>> probeChannels(
       List<TvChannel> channels) async {
+    if (!enabled) return {};
     final targets = channels.take(maxProbes).toList();
     final out = <String, String>{};
     try {
