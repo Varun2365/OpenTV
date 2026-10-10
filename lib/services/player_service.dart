@@ -74,6 +74,17 @@ class PlayerService extends ChangeNotifier {
   Duration _lastPosition = Duration.zero;
   Timer? _stallTimer;
   Timer? _loadWatchdog;
+  // Pi freeze detection: video_player polls getPosition() every 100ms while
+  // playing, so a healthy pipeline advances position constantly. Static
+  // position + isPlaying + first frame on screen = wedged pipeline (stuck
+  // preroll / starved live edge). _checkPiFlow recovers it (re-kick, then
+  // fresh reopen) instead of showing one frame forever. Costs nothing when
+  // healthy: three timestamps + one int, checked every 3s.
+  Timer? _flowTimer;
+  DateTime _lastFlowAt = DateTime.now();
+  int _flowStrikes = 0;
+  DateTime _lastRecoveryAt =
+      DateTime.fromMillisecondsSinceEpoch(0);
   bool _disposed = false;
 
   Future<void> init(AppState state) async {
@@ -182,6 +193,14 @@ class PlayerService extends ChangeNotifier {
             : 'Still no picture after 90s — the link is likely dead. Retry, or pick a green-dot channel.');
       }
     });
+    // Pi freeze watchdog: a wedged pipeline shows exactly one frame forever.
+    // Desktop mpv self-recovers via reconnect + stall logic, so Pi-only.
+    if (_piMode) {
+      _flowTimer =
+          Timer.periodic(const Duration(seconds: 3), (_) {
+        unawaited(_checkPiFlow());
+      });
+    }
     // State is the boss: any play/stop (TV, keyboard, phone) drives the
     // active backend (single path — no double-open, no orphan audio).
     state.addListener(_syncWithState);
@@ -416,10 +435,13 @@ class PlayerService extends ChangeNotifier {
       // dry time), don't reset.
     }
     // Position advance also counts as progress (catches playbin stalls
-    // where isBuffering flickers).
+    // where isBuffering flickers) AND resets the freeze clock — a moving
+    // position is proof the pipeline flows.
     if (v.position != _lastPosition) {
       _lastPosition = v.position;
       _lastProgress = DateTime.now();
+      _lastFlowAt = DateTime.now();
+      _flowStrikes = 0;
     }
     if (v.hasError) {
       final desc = (v.errorDescription ?? '').trim();
@@ -442,6 +464,73 @@ class PlayerService extends ChangeNotifier {
       return end;
     } catch (_) {
       return 0;
+    }
+  }
+
+  /// Pi freeze watchdog body (every 3s). Fires only when we believe the
+  /// picture should be moving: settled past the tank, first frame on screen,
+  /// controller in playing state — yet the pipeline clock hasn't advanced
+  /// for 8s+. Recovery ladder: re-kick PLAYING twice (cheap, keeps the
+  /// pipeline), then full reopens (fresh pipeline at the live edge — the
+  /// only cure for a wedged Bin), then an honest error card. Cooldown stops
+  /// thrash; everything resets the moment position moves or the channel
+  /// changes. Zero allocation: timestamps + ints only.
+  Future<void> _checkPiFlow() async {
+    if (_disposed || !_piMode) return;
+    final s = _state;
+    if (s == null) return;
+    final ch = s.playing;
+    if (ch == null || s.playError != null || s.prebuffering) return;
+    if (!s.hasVideo) return; // no first frame yet — not frozen, just loading
+    final c = _piCtrl;
+    if (c == null) return;
+    try {
+      if (!c.value.isInitialized || !c.value.isPlaying) return;
+    } catch (_) {
+      return; // controller gone mid-check
+    }
+    final frozenSec =
+        DateTime.now().difference(_lastFlowAt).inSeconds;
+    if (frozenSec < 8) return;
+    if (DateTime.now()
+            .difference(_lastRecoveryAt)
+            .inSeconds <
+        15) {
+      return; // cooling down from the last attempt
+    }
+    final seq = _piSeq;
+    _flowStrikes++;
+    _lastRecoveryAt = DateTime.now();
+    try {
+      if (_flowStrikes <= 2) {
+        // Cheap re-kick: re-issue the state change. Fixes pipelines stuck
+        // between PAUSED preroll and PLAYING (the classic 1-frame freeze).
+        debugPrint('Pi flow watchdog: picture frozen ${frozenSec}s, '
+            're-kick #$_flowStrikes (${ch.name})');
+        await c.pause();
+        await Future.delayed(
+            const Duration(milliseconds: 400));
+        if (seq != _piSeq || _disposed) return;
+        if (s.playing?.id != ch.id || s.playError != null) return;
+        await c.play();
+        _lastFlowAt = DateTime.now();
+      } else if (_flowStrikes <= 5) {
+        // Wedged Bin: only a fresh pipeline (new live edge) cures it.
+        // Same single path as a manual retry — old controller is disposed
+        // first, so no stacking, no audio leak, no memory growth.
+        debugPrint('Pi flow watchdog: still frozen, '
+            'reopen #$_flowStrikes (${ch.name})');
+        _lastFlowAt = DateTime.now();
+        _currentId = null; // force reopen of the same channel
+        s.play(ch);
+      } else {
+        debugPrint('Pi flow watchdog: giving up after $_flowStrikes '
+            'attempts (${ch.name})');
+        s.setPlayError(
+            'The picture froze repeatedly — this stream stalls on the Pi. Try a green-dot channel.');
+      }
+    } catch (e) {
+      debugPrint('Pi flow recovery failed: $e');
     }
   }
 
@@ -512,6 +601,8 @@ class PlayerService extends ChangeNotifier {
 
     _lastProgress = DateTime.now();
     _lastPosition = Duration.zero;
+    _lastFlowAt = DateTime.now(); // fresh freeze clock per channel
+    _flowStrikes = 0;
     s.setHasVideo(
         ctrl.value.size.width > 0 && ctrl.value.size.height > 0);
 
@@ -625,6 +716,8 @@ class PlayerService extends ChangeNotifier {
     if (ch.id == _currentId) return; // already opening/open
     _currentId = ch.id;
     _lastProgress = DateTime.now(); // fresh stall clock per channel
+    _lastFlowAt = DateTime.now(); // fresh freeze clock per channel
+    _flowStrikes = 0;
     if (_piMode) {
       final seq = ++_piSeq;
       _openSeq = seq;
@@ -856,6 +949,8 @@ class PlayerService extends ChangeNotifier {
     _stallTimer = null;
     _loadWatchdog?.cancel();
     _loadWatchdog = null;
+    _flowTimer?.cancel();
+    _flowTimer = null;
     _prebufferDone?.complete();
     _prebufferDone = null;
     _state?.removeListener(_syncWithState);

@@ -50,9 +50,14 @@ class _PlayerScreenState extends State<PlayerScreen> {
     // video surface when PlayerService notifies (desktop mpv controller is
     // stable, so this is a no-op there).
     widget.player.addListener(_onPlayerBackend);
-    // Rebuild once a second so "still connecting…" appears after 6s.
+    // Rebuild once a second WHILE LOADING so "still connecting…" + elapsed
+    // seconds stay live. Gated: settled playback rebuilds only on real
+    // state/position events — a full-subtree setState every second would
+    // tax the Pi for nothing (everything else notifies its own changes).
     _tick = Timer.periodic(
-        const Duration(seconds: 1), (_) => mounted ? setState(() {}) : null);
+        const Duration(seconds: 1),
+        (_) =>
+            mounted && _loading ? setState(() {}) : null);
     // Fresh tune-in flashes the info bar; AppState auto-hides it after 5s.
     // Deferred past mount: initState runs inside AnimatedSwitcher's
     // SlideTransition build, so a synchronous notifyListeners() would
