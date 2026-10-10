@@ -119,6 +119,27 @@ class AppState extends ChangeNotifier {
   // Favourite channel ids, most-recent first. Tiny — prefs is fine.
   List<String> favouriteIds = [];
 
+  // Recents: last-played channel ids, most-recent-first, capped at 10.
+  // Feeds the remote Recents page (in-memory; a reboot starts fresh).
+  final List<String> recentIds = [];
+  final Map<String, DateTime> recentAt = {};
+
+  List<TvChannel> get recentChannels => [
+        for (final id in recentIds)
+          for (final c
+              in allChannels.where((c) => c.id == id).take(1))
+            c
+      ];
+
+  void _pushRecent(TvChannel ch) {
+    recentIds.remove(ch.id);
+    recentIds.insert(0, ch.id);
+    recentAt[ch.id] = DateTime.now();
+    while (recentIds.length > 10) {
+      recentAt.remove(recentIds.removeLast());
+    }
+  }
+
   // Preset (built-in, not user-added) categories. Off = sidebar shows
   // only ★ Favourites + your own pasted lists. Instant + persisted.
   bool showPresets = true;
@@ -154,28 +175,12 @@ class AppState extends ChangeNotifier {
     return v[i].channels;
   }
 
-  /// Home-grid display order: this category's favourites first, then the
-  /// full category list (favourites included again). The D-pad index runs
-  /// over THIS flat list, so moving across the section boundary is
-  /// seamless — headers are decoration, never focus stops.
-  List<TvChannel> get displayChannels {
-    final all = sidebarChannels;
-    if (all.isEmpty) return const [];
-    final favs = [for (final c in all) if (isFav(c.id)) c];
-    if (favs.isEmpty || favs.length == all.length) return all;
-    return [...favs, ...all];
-  }
+  /// Home-grid display order: one flat category list, exactly as
+  /// stored — no sections, so the D-pad index maps 1:1 onto tiles.
+  List<TvChannel> get displayChannels => sidebarChannels;
 
   /// Tiles in the Favourites section (0 = single-section grid).
-  int get displayFavCount {
-    final all = sidebarChannels;
-    if (all.isEmpty) return 0;
-    var n = 0;
-    for (final c in all) {
-      if (isFav(c.id)) n++;
-    }
-    return (n == 0 || n == all.length) ? 0 : n;
-  }
+  int get displayFavCount => 0;
 
   String get sideTitle {
     if (sideIndex <= 0) return 'Favourites';
@@ -492,6 +497,7 @@ class AppState extends ChangeNotifier {
     _armInfoTimer();
     playerBtnIndex = 0;
     playerFocusVisible = false; // Cancel starts unfocused; Down focuses it
+    _pushRecent(ch);
     notifyListeners();
   }
 
@@ -725,6 +731,16 @@ class AppState extends ChangeNotifier {
       notifyListeners();
       return;
     }
+    // On the player, Back/Home exit to home. (Without this they fall
+    // into grid-zone moves that are invisible behind the video, so the
+    // remote's Back/Home look dead while watching.)
+    if (playing != null &&
+        (key == RemoteKey.back || key == RemoteKey.home)) {
+      stop();
+      _keyCtrl.add(key);
+      notifyListeners();
+      return;
+    }
     // A player overlay (loading / error) eats the D-pad so its buttons
     // stay reachable from the couch and the phone remote.
     if (playing != null &&
@@ -786,22 +802,48 @@ class AppState extends ChangeNotifier {
       return;
     }
     final cols = gridColumns < 1 ? 1 : gridColumns;
-    final col = gridIndex % cols;
+    // Sections (Favourites / All) restart visual columns on a fresh row,
+    // so the flat index modulo cols is only valid WITHIN one section.
+    final favC = displayFavCount;
+    final segS = (favC > 0 && gridIndex >= favC) ? favC : 0;
+    final segE =
+        (favC > 0 && gridIndex < favC) ? favC : list.length;
+    final vcol = (gridIndex - segS) % cols;
     switch (key) {
       case RemoteKey.up:
-        // Top row stays put — the ONLY way to the sidebar is left
-        // off a left-edge tile. No more accidental jumps.
-        gridIndex =
-            (gridIndex - cols).clamp(0, list.length - 1);
+        if (gridIndex - cols >= segS) {
+          gridIndex -= cols; // row above, same section
+        } else if (segS > 0) {
+          // First row of All: rise into the Favourites last row at
+          // the same visual column (clamped into a partial row).
+          final lastRow = segS -
+              ((segS % cols == 0) ? cols : segS % cols);
+          gridIndex =
+              (lastRow + vcol).clamp(0, segS - 1);
+        } else {
+          // Top row stays put — the ONLY way to the sidebar is left
+          // off a left-edge tile. No more accidental jumps.
+          gridIndex =
+              (gridIndex - cols).clamp(0, list.length - 1);
+        }
         _saveSideCursor();
         break;
       case RemoteKey.down:
-        gridIndex =
-            (gridIndex + cols).clamp(0, list.length - 1);
+        if (gridIndex + cols < segE) {
+          gridIndex += cols; // row below, same section
+        } else if (segE < list.length) {
+          // Last row of Favourites: drop into the All first row at
+          // the same visual column (clamped into a partial row).
+          gridIndex =
+              (segE + vcol).clamp(segE, list.length - 1);
+        } else {
+          gridIndex =
+              (gridIndex + cols).clamp(0, list.length - 1);
+        }
         _saveSideCursor();
         break;
       case RemoteKey.left:
-        if (col == 0) {
+        if (vcol == 0) {
           _saveSideCursor();
           zone = FocusZone.sidebar; // step back to categories
         } else {

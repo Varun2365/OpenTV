@@ -56,6 +56,11 @@ class _TvHomeState extends State<TvHome> {
   void initState() {
     super.initState();
     widget.state.addListener(_onState);
+    // Sync the category tracker at mount: otherwise the first state
+    // notification after returning from the player looks like a fresh
+    // category switch and _onState jumps the grid to the top,
+    // orphaning the (preserved) deep focus below the fold.
+    _lastSide = widget.state.sideIndex;
     // Persist the exact grid pixels continuously: this widget is
     // unmounted while the player is up, so Back lands on the same
     // scroll amount, selection and sidebar as at play time.
@@ -534,9 +539,15 @@ class _TvHomeState extends State<TvHome> {
                       bottom: 4),
                   child: GestureDetector(
                     onTap: () => s.selectSide(i),
-                    child: AnimatedContainer(
+                    child: AnimatedScale(
+                      // Selected category pops slightly.
+                      scale: active ? 1.045 : 1.0,
                       duration: const Duration(
                           milliseconds: 180),
+                      curve: Curves.easeOut,
+                      child: AnimatedContainer(
+                        duration: const Duration(
+                            milliseconds: 180),
                       padding:
                           const EdgeInsets.symmetric(
                               horizontal: 12,
@@ -555,6 +566,18 @@ class _TvHomeState extends State<TvHome> {
                                 color: const Color(
                                     0xFFFFB338),
                                 width: 1.5)
+                            : null,
+                        // Selected category carries a soft blue glow.
+                        boxShadow: active
+                            ? const [
+                                BoxShadow(
+                                    color: Color(
+                                        0x663D9BFF),
+                                    blurRadius: 20,
+                                    spreadRadius: 1,
+                                    offset:
+                                        Offset(0, 3)),
+                              ]
                             : null,
                       ),
                       child: Row(
@@ -602,6 +625,7 @@ class _TvHomeState extends State<TvHome> {
                           ),
                         ],
                       ),
+                    ),
                     ),
                   ),
                 );
@@ -660,15 +684,6 @@ class _TvHomeState extends State<TvHome> {
   Widget _content(
       BuildContext context, AppState s, int cols) {
     final list = s.sidebarChannels;
-    final display = s.displayChannels;
-    final favCount = s.displayFavCount;
-    final gridDel =
-        SliverGridDelegateWithFixedCrossAxisCount(
-      crossAxisCount: cols,
-      mainAxisSpacing: 14,
-      crossAxisSpacing: 12,
-      childAspectRatio: 0.62,
-    );
     return Stack(
       fit: StackFit.expand,
       children: [
@@ -756,87 +771,43 @@ class _TvHomeState extends State<TvHome> {
         Expanded(
           child: list.isEmpty
               ? _emptyFav()
-              // Two sliver sections (Favourites, then All) over ONE
-              // flat display list — headers are full-width boxes, so
-              // the D-pad index stays seamless across the boundary.
-              : CustomScrollView(
+              : GridView.builder(
                   controller: _gridCtrl,
-                  slivers: [
-                    if (favCount > 0) ...[
-                      SliverToBoxAdapter(
-                          child: _sectionHead(
-                              'Favourites',
-                              top: 26)),
-                      SliverPadding(
-                        padding:
-                            const EdgeInsets.symmetric(
-                                horizontal: 28),
-                        sliver: SliverGrid(
-                          gridDelegate: gridDel,
-                          delegate:
-                              SliverChildBuilderDelegate(
-                            (c, j) =>
-                                _gridTile(s, display, j),
-                            childCount: favCount,
-                          ),
-                        ),
-                      ),
-                      SliverToBoxAdapter(
-                          child: _sectionHead(
-                              'All',
-                              top: 24)),
-                    ],
-                    SliverPadding(
-                      padding:
-                          const EdgeInsets.fromLTRB(
-                              28, 0, 28, 30),
-                      sliver: SliverGrid(
-                        gridDelegate: gridDel,
-                        delegate:
-                            SliverChildBuilderDelegate(
-                          (c, j) => _gridTile(
-                              s, display, favCount + j),
-                          childCount:
-                              display.length - favCount,
-                        ),
-                      ),
-                    ),
-                  ],
+                  padding:
+                      const EdgeInsets.fromLTRB(
+                          28, 30, 28, 30),
+                  gridDelegate:
+                      SliverGridDelegateWithFixedCrossAxisCount(
+                    crossAxisCount: cols,
+                    mainAxisSpacing: 14,
+                    crossAxisSpacing: 12,
+                    childAspectRatio: 0.62,
+                  ),
+                  itemCount: list.length,
+                  itemBuilder: (c, j) {
+                    final ch = list[j];
+                    final isFocus =
+                        s.zone == FocusZone.grid &&
+                            s.gridIndex == j;
+                    return RepaintBoundary(
+                      key: _tileKeys.putIfAbsent(
+                          j, () => GlobalKey()),
+                      child: _tile(
+                          ch,
+                          isFocus,
+                          s.healthById[ch.id] ??
+                              'unknown',
+                          s.isFav(ch.id),
+                          () =>
+                              widget.onPlay(ch)),
+                    );
+                  },
                 ),
         ),
             ],
           ),
         ],
       );
-  }
-
-  // ── Small section heading for the home grid ──────────────────────
-  Widget _sectionHead(String t, {double top = 24}) =>
-      Padding(
-        padding: EdgeInsets.fromLTRB(28, top, 28, 10),
-        child: Text(t.toUpperCase(),
-            style: const TextStyle(
-                color: _kPaper,
-                fontSize: 12,
-                letterSpacing: 2,
-                fontWeight: FontWeight.w700)),
-      );
-
-  // ── One tile at display position j (Favourites run 0..favCount-1) ──
-  Widget _gridTile(
-      AppState s, List<TvChannel> display, int j) {
-    final ch = display[j];
-    final isFocus =
-        s.zone == FocusZone.grid && s.gridIndex == j;
-    return RepaintBoundary(
-      key: _tileKeys.putIfAbsent(j, () => GlobalKey()),
-      child: _tile(
-          ch,
-          isFocus,
-          s.healthById[ch.id] ?? 'unknown',
-          s.isFav(ch.id),
-          () => widget.onPlay(ch)),
-    );
   }
 
   Widget _emptyFav() => const Center(

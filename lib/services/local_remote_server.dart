@@ -468,6 +468,41 @@ class LocalRemoteServer {
           res.headers.contentType = ContentType.json;
           res.write(jsonEncode({'ok': true, 'removed': id}));
         }
+      } else if (req.method == 'POST' &&
+          path == '/api/playlists/reorder') {
+        final body = await utf8.decoder.bind(req).join();
+        try {
+          final m =
+              Map<String, dynamic>.from(jsonDecode(body));
+          final ids = [
+            for (final e in (m['order'] as List? ?? const []))
+              '$e'
+          ];
+          final moved = '${m['moved'] ?? ''}';
+          s.reorderCustomPlaylists(ids,
+              movedId: moved.isEmpty ? null : moved);
+          await CustomPlaylistStore.saveAll(s.customPlaylists);
+          _broadcastPlaylists();
+          _broadcastNow();
+          res.headers.contentType = ContentType.json;
+          res.write(jsonEncode({'ok': true}));
+        } catch (e) {
+          res.statusCode = 400;
+          res.headers.contentType = ContentType.json;
+          res.write(
+              jsonEncode({'ok': false, 'error': '$e'}));
+        }
+      } else if (req.method == 'GET' && path == '/api/recents') {
+        // Last-played channels, most-recent-first (capped at 10).
+        res.headers.contentType = ContentType.json;
+        res.write(jsonEncode([
+          for (final c in s.recentChannels)
+            {
+              ..._chJson(s, c),
+              'playedAt':
+                  s.recentAt[c.id]?.toIso8601String(),
+            }
+        ]));
       } else if (req.method == 'GET' && path == '/api/tracks') {
         res.headers.contentType = ContentType.json;
         res.write(jsonEncode({
@@ -732,6 +767,7 @@ background:linear-gradient(90deg,transparent,rgba(255,179,56,.55),transparent)}
 .transport{display:grid;grid-template-columns:1.15fr 1fr 1fr 1fr;gap:8px;margin-top:15px}
 .transport button{font-size:13px}
 #infoBtn.on{background:var(--gold-soft);border-color:rgba(255,179,56,.55);color:var(--gold)}
+#muteBtn.on{background:rgba(255,90,90,.12);border-color:rgba(255,90,90,.5);color:#FF7A7A}
 #ppBtn{background:var(--gold);color:var(--gold-ink);border-color:transparent;font-weight:800;
 box-shadow:0 6px 22px rgba(255,179,56,.28)}
 #ppBtn:active{background:var(--gold)}
@@ -837,6 +873,11 @@ color:#FF7A7A;font-weight:800}
 color:var(--muted);font-weight:800;margin:0 2px 6px}
 .ledger{margin-top:16px;border-top:1px solid var(--hair)}
 .lrow{display:flex;align-items:stretch;border-bottom:1px solid var(--hair);background:transparent}
+.lmove{display:flex;flex-direction:column;justify-content:center;gap:3px;padding-right:4px;flex:0 0 auto}
+.lmove button{width:32px;height:28px;min-height:0;padding:0;margin:0;border-radius:9px;font-size:10px;
+color:var(--muted);background:transparent;border:1px solid transparent}
+.lmove button:disabled{opacity:.22}
+.lmove button:active{color:var(--gold);transform:none}
 .lmain{flex:1;min-width:0;display:flex;align-items:center;gap:12px;text-align:left;border:0;border-radius:0;
 background:transparent;padding:13px 4px;margin:0;min-height:60px}
 .lstar{color:var(--gold);font-size:14px;flex:0 0 auto}
@@ -850,6 +891,17 @@ color:var(--muted);min-height:0;width:40px;height:40px;padding:0;margin:0 0 0 4p
 display:flex;align-items:center;justify-content:center}
 .lrm:active{color:#FF7A7A;background:rgba(255,90,90,.1);border-color:rgba(255,90,90,.35);transform:none}
 .lEmpty{padding:26px 6px;text-align:center;font-size:12.5px;color:var(--muted);line-height:1.6}
+/* recents: numbered list rows, most recent first */
+.rrow{display:flex;align-items:center;gap:12px;width:100%;text-align:left;border:0;border-bottom:1px solid var(--hair);
+border-radius:0;background:transparent;padding:11px 4px;margin:0;min-height:62px}
+.rrow:active{background:#1B1B24;transform:none}
+.rrow img{width:42px;height:42px;border-radius:12px;object-fit:cover;background:var(--deep);flex:0 0 auto}
+.rrow .rfb{width:42px;height:42px;border-radius:12px;background:var(--deep);display:flex;align-items:center;justify-content:center;font-size:19px;flex:0 0 auto}
+.rrow .rn{font-size:11px;color:var(--muted);font-weight:800;font-variant-numeric:tabular-nums;flex:0 0 auto;width:18px}
+.rrow .rtx{min-width:0;flex:1}
+.rrow .rtx b{font-size:14px;display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rrow .rtx span{font-size:11.5px;color:var(--muted)}
+.rrow .rt{font-size:11px;color:var(--muted);font-weight:600;white-space:nowrap;flex:0 0 auto}
 .pl input[type=range]{accent-color:var(--gold);height:42px;padding:0;border:0;background:transparent;min-height:0;margin:6px 0 2px}
 .setval{font-size:30px;font-weight:800;font-variant-numeric:tabular-nums;letter-spacing:-.02em;margin:6px 0 2px}
 .setval small{font-size:14px;color:var(--muted);font-weight:600}
@@ -885,6 +937,7 @@ display:flex;align-items:center;justify-content:center}
 <nav class="drNav">
 <button class="navBtn on" id="nv-remote" onclick="tab('remote')"><span class="ic">◉</span><span class="lb">Remote<small>D-pad • play • volume</small></span><span class="arw">›</span></button>
 <button class="navBtn" id="nv-ch" onclick="tab('ch')"><span class="ic">▤</span><span class="lb">Channels<small>Your lists • tap to play</small></span><span class="arw">›</span></button>
+<button class="navBtn" id="nv-recents" onclick="tab('recents')"><span class="ic">🕐</span><span class="lb">Recents<small>Last played • tap to replay</small></span><span class="arw">›</span></button>
 <button class="navBtn" id="nv-lists" onclick="tab('lists')"><span class="ic">★</span><span class="lb">Lists<small>Add • view • remove</small></span><span class="arw">›</span></button>
 <button class="navBtn" id="nv-settings" onclick="tab('settings')"><span class="ic">⚙</span><span class="lb">Settings<small>Playback buffer</small></span><span class="arw">›</span></button>
 </nav>
@@ -906,7 +959,6 @@ display:flex;align-items:center;justify-content:center}
 <button class="ghost" id="infoBtn" onclick="info()">ⓘ Info</button>
 </div>
 <div style="display:flex;gap:8px;margin-bottom:10px"><button class="ghost" id="favBtn" onclick="toggleFavPlaying()" style="flex:1">☆ Favourite</button></div>
-<div style="display:flex;align-items:center;gap:10px;margin-bottom:4px"><span style="font-size:12px;color:var(--muted)">Quality</span><select id="qSel" onchange="setQuality(this.value)" style="flex:1;min-width:0;padding:12px;border-radius:12px;border:1px solid var(--line);background:#0E0E13;color:var(--paper);font-size:14px;font-family:inherit"><option value="auto">Auto</option></select></div>
 <p class="eyebrow">Direction</p>
 <div class="dpad">
 <span></span><button onpointerdown="hold('up',event,true)" onpointerup="unhold()" onpointerleave="unhold()" onpointercancel="unhold()" oncontextmenu="return false" aria-label="Up">▲</button><span></span>
@@ -917,7 +969,7 @@ display:flex;align-items:center;justify-content:center}
 <div class="seg" style="margin-top:8px"><button onclick="key('channelUp')">CH ＋</button><button onclick="key('channelDown')">CH －</button></div></div>
 <div class="ctl"><p class="eyebrow">Volume</p>
 <div class="seg" style="margin-top:8px"><button onclick="key('volUp')">VOL ＋</button><button onclick="key('volDown')">VOL －</button></div>
-<button class="wide" onclick="key('mute')">Mute</button></div>
+<button class="wide" id="muteBtn" onclick="key('mute')">Mute</button></div>
 </div>
 </div></section>
 <section class="page" id="pg-ch">
@@ -932,6 +984,12 @@ display:flex;align-items:center;justify-content:center}
 <h3>No lists yet</h3><p>Paste an M3U link under Lists and it appears here as its own tab.</p>
 <button class="go" onclick="tab('lists')">＋ Add a list</button></div>
 </section>
+<section class="page" id="pg-recents"><div class="padX">
+<p class="eyebrow">History</p>
+<h2 class="listsTitle">Recents</h2>
+<p class="listsSub" id="recCount">Last played first</p>
+<div class="ledger" id="recList" style="margin-top:12px"></div>
+</div></section>
 <section class="page" id="pg-lists"><div class="padX">
 <p class="eyebrow">Library</p>
 <h2 class="listsTitle">Lists</h2>
@@ -1020,17 +1078,11 @@ function key(k){
  if(ws&&ws.readyState===1){ws.send(JSON.stringify({type:'key',key:k}));return}
  fetch('/api/key',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:k})}).then(pull)}
 function play(id){
- setTimeout(loadQualities,4000);
  if(ws&&ws.readyState===1){ws.send(JSON.stringify({type:'play',id}));return}
  fetch('/api/play',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})}).then(pull)}
 let curPlayingId=null,curPlayingFav=false;
 async function toggleFavPlaying(){if(!curPlayingId)return;try{const r=await fetch('/api/favourites',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:curPlayingId})});const j=await r.json();if(j.ok){curPlayingFav=!!j.fav;paintFavBtn()}}catch(e){}}
 function paintFavBtn(){const b=document.getElementById('favBtn');if(!b)return;b.textContent=(curPlayingFav?'★ ':'☆ ')+'Favourite'}
-async function loadQualities(){try{const r=await fetch('/api/tracks');const j=await r.json();
- const sel=document.getElementById('qSel');if(!sel)return;
- sel.innerHTML='<option value="auto">Auto</option>'+(j.video||[]).filter(t=>t.id!=='auto'&&t.id!=='no').map(t=>'<option value="'+t.id+'">'+esc(t.title||t.id)+'</option>').join('');
- sel.value=j.selected||'auto'}catch(e){}}
-async function setQuality(id){try{await fetch('/api/tracks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({video:id})})}catch(e){}setTimeout(loadQualities,1500)}
 function info(){
  if(ws&&ws.readyState===1){ws.send(JSON.stringify({type:'info'}));return}
  fetch('/api/info',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({toggle:true})}).then(pull)}
@@ -1038,6 +1090,7 @@ async function pull(){try{const r=await fetch('/api/now');const j=await r.json()
 function paint(j){
  const p=j.playing||j.focus||null;
  tvZone=j.zone||'grid';
+ if(p&&p.id&&p.id!==curPlayingId&&document.getElementById('pg-recents').classList.contains('on'))loadRecents();
  curPlayingId=p?p.id:null;curPlayingFav=!!(p&&p.fav);paintFavBtn();
  document.getElementById('np').textContent=p?p.name:'—';
  document.getElementById('brandSub').textContent=p?p.name:'Remote';
@@ -1047,6 +1100,8 @@ function paint(j){
  document.getElementById('npsub').textContent=sub;
  document.getElementById('ppBtn').textContent=j.isPlaying?'⏸ Pause':'⏯ Play';
  document.getElementById('infoBtn').classList.toggle('on',!!j.infoVisible);
+ document.getElementById('muteBtn').classList.toggle('on',!!j.muted);
+ document.getElementById('muteBtn').textContent=j.muted?'🔇 Muted — tap to unmute':'Mute';
  setConn(true,'live')}
 function hcol(h){return h==='fast'?'#3DDC84':h==='slow'?'#FFB338':h==='dead'?'#FF5A5A':'#4A4A54'}
 function favStar(c,safeId){return '<span role="button" aria-label="Toggle favourite" onclick="event.stopPropagation();toggleFav(\''+safeId+'\')" style="position:absolute;top:6px;right:6px;width:34px;height:34px;display:flex;align-items:center;justify-content:center;border-radius:50%;background:rgba(0,0,0,.5);border:1px solid '+(c.fav?'rgba(255,179,56,.5)':'rgba(255,255,255,.12)')+';color:'+(c.fav?'#FFB338':'#6E6A80')+';font-size:15px;line-height:1;z-index:2">★</span>'}
@@ -1075,12 +1130,19 @@ function render(arr){
  if(!hasCats){g.innerHTML='';document.getElementById('favWrap').innerHTML='';empty.style.display='block'}
  else if(arr.length===0){empty.style.display='block';empty.querySelector('h3').textContent='Nothing found';empty.querySelector('p').textContent='Try another search or list.';empty.querySelector('.go').style.display='none'}
  else{empty.querySelector('h3').textContent='No lists yet';empty.querySelector('p').textContent='Paste an M3U link under Lists and it appears here as its own tab.';empty.querySelector('.go').style.display='';empty.style.display='none'}}
-function tab(t){for(const x of['remote','ch','lists','settings']){document.getElementById('pg-'+x).classList.toggle('on',x===t);document.getElementById('nv-'+x).classList.toggle('on',x===t)}
+function tab(t){for(const x of['remote','ch','recents','lists','settings']){document.getElementById('pg-'+x).classList.toggle('on',x===t);document.getElementById('nv-'+x).classList.toggle('on',x===t)}
 closeAdd();closeCfm();closeDrawer();window.scrollTo({top:0});lastY=window.scrollY||0;
 document.getElementById('pg-ch').classList.remove('noChips');
-if(t==='ch')loadCats(true);if(t==='lists')loadPlaylists();if(t==='settings')loadSettings();if(t==='remote')loadQualities()}
+if(t==='ch')loadCats(true);if(t==='recents')loadRecents();if(t==='lists')loadPlaylists();if(t==='settings')loadSettings()}
+function relTime(iso){try{const t=new Date(iso||'').getTime();if(!t)return'';const s=Math.max(0,Math.floor((Date.now()-t)/1000));if(s<60)return'just now';const m=Math.floor(s/60);if(m<60)return m+'m ago';const h=Math.floor(m/60);if(h<24)return h+'h ago';return Math.floor(h/24)+'d ago'}catch(e){return''}}
+async function loadRecents(){try{const r=await fetch('/api/recents');const arr=await r.json();
+ document.getElementById('recCount').textContent=arr.length?(arr.length+' recent • most recent first'):'Nothing played yet';
+ document.getElementById('recList').innerHTML=arr.map((c,i)=>{
+  const safeId=(c.id||'').replace(/'/g,'');
+  const logo=c.logo?'<img src="'+esc(c.logo)+'" loading="lazy" onerror="this.remove()"/>':'<span class="rfb">📺</span>';
+  return '<button class="rrow" onclick="play(\''+safeId+'\')"><span class="rn">'+(i+1)+'</span>'+logo+'<span class="rtx"><b>'+esc(c.name)+'</b><span>'+esc(c.category||'')+'</span></span><span class="rt">'+relTime(c.playedAt)+'</span></button>'}).join('')||'<div class="lEmpty">Nothing played yet.<br/>Play anything and it lands here.</div>'}catch(e){}}
 async function loadCats(force){try{const r=await fetch('/api/categories');const fresh=await r.json();
- const sig=JSON.stringify(fresh.map(c=>[c.title,c.count]));
+ const sig=JSON.stringify(fresh.map((c,i)=>[i,c.title,c.count]));
  const box=document.getElementById('chips');
  if(sig===catsSig){if(force&&!favMode){if(curCat>=cats.length)curCat=0;selectCat(curCat)}return}
  const sx=box?box.scrollLeft:0;
@@ -1132,13 +1194,21 @@ async function saveBuffer(){const v=parseInt(document.getElementById('bufRange')
  b.disabled=false}
 function plMsg(t,cls){const e=document.getElementById('plMsg');e.textContent=t;e.className='plmsg '+(cls||'')}
 async function loadPlaylists(){try{const r=await fetch('/api/playlists');const arr=await r.json();
+ plCache=arr;
  const n=arr.length;
  document.getElementById('listsCount').textContent=n===0?'No saved playlists yet':n===1?'1 saved playlist • tap to open its channels':n+' saved playlists • tap to open its channels';
- document.getElementById('plList').innerHTML=arr.map(p=>
- '<div class="lrow"><button class="lmain" onclick="viewList(decodeURIComponent(\''+encodeURIComponent(p.name).replace(/'/g,'%27')+'\'))">'
+ document.getElementById('plList').innerHTML=arr.map((p,i)=>
+ '<div class="lrow"><span class="lmove"><button onclick="movePl(\''+p.id+'\',-1)"'+(i===0?' disabled':'')+' aria-label="Move '+esc(p.name)+' up">▲</button><button onclick="movePl(\''+p.id+'\',1)"'+(i===n-1?' disabled':'')+' aria-label="Move '+esc(p.name)+' down">▼</button></span><button class="lmain" onclick="viewList(decodeURIComponent(\''+encodeURIComponent(p.name).replace(/'/g,'%27')+'\'))">'
  +'<span class="ldot" style="background:'+numCss(p.color)+'">'+(EMOJI[p.icon]||'📺')+'</span><span class="ltx"><b>'+esc(p.name)+'</b><span>'+p.count+' channels</span></span><span class="lgo">›</span></button>'
  +'<button class="lrm" onclick="askDel(\''+p.id+'\',\''+encodeURIComponent(p.name).replace(/'/g,'%27')+'\')" aria-label="Remove '+esc(p.name)+'">'
  +'<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16"/><path d="M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/><path d="M6.5 7l1 12a1 1 0 0 0 1 1h7a1 1 0 0 0 1-1l1-12"/></svg></button></div>').join('')||'<div class="lEmpty">Nothing saved yet.<br/>Tap Add New List to begin.</div>'}catch(e){}}
+let plCache=[];
+async function movePl(id,dir){
+ const i=plCache.findIndex(p=>p.id===id);const j=i+dir;
+ if(i<0||j<0||j>=plCache.length)return;
+ const order=plCache.map(p=>p.id);const t=order[i];order[i]=order[j];order[j]=t;
+ try{await fetch('/api/playlists/reorder',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({order,moved:id})})}catch(e){}
+ loadPlaylists();loadCats(true)}
 const ICONS=[{k:'tv',e:'📺',n:'TV'},{k:'film',e:'🎬',n:'Movies'},{k:'trophy',e:'🏆',n:'Sports'},{k:'musicalNote',e:'🎵',n:'Music'},{k:'newspaper',e:'📰',n:'News'},{k:'faceSmile',e:'😊',n:'Kids'},{k:'globeAlt',e:'🌍',n:'Global'},{k:'flag',e:'🚩',n:'Nation'},{k:'radio',e:'📻',n:'Radio'},{k:'star',e:'⭐',n:'Starred'},{k:'heart',e:'❤️',n:'Loved'},{k:'bolt',e:'⚡',n:'Quick'},{k:'sparkles',e:'✨',n:'Fresh'},{k:'ticket',e:'🎟️',n:'Events'},{k:'play',e:'▶️',n:'Play'},{k:'home',e:'🏠',n:'Home'},{k:'rss',e:'📡',n:'Feeds'},{k:'signal',e:'📶',n:'Signal'},{k:'clock',e:'🕐',n:'Time'},{k:'moon',e:'🌙',n:'Night'},{k:'sun',e:'☀️',n:'Day'},{k:'cloud',e:'☁️',n:'Cloud'},{k:'bookOpen',e:'📖',n:'Stories'},{k:'bookmark',e:'🔖',n:'Saved'},{k:'gift',e:'🎁',n:'Gifts'},{k:'cake',e:'🎂',n:'Fun'},{k:'photo',e:'🖼️',n:'Photos'},{k:'videoCamera',e:'🎥',n:'Videos'},{k:'microphone',e:'🎤',n:'Talk'},{k:'phone',e:'📱',n:'Mobile'},{k:'users',e:'👥',n:'Community'},{k:'user',e:'👤',n:'Personal'},{k:'briefcase',e:'💼',n:'Work'},{k:'academicCap',e:'🎓',n:'Learn'},{k:'map',e:'🗺️',n:'Travel'},{k:'wallet',e:'👛',n:'Money'},{k:'cog6Tooth',e:'⚙️',n:'Settings'}];
 const COLORS=['#3D9BFF','#FFB338','#3DDC84','#FF5A5A','#B388FF','#FF7AB8','#4DD0E1','#FFD54F','#9CCC65','#F5F1E8'];
 const EMOJI={};ICONS.forEach(o=>EMOJI[o.k]=o.e);
@@ -1195,7 +1265,6 @@ function connect(){
  ws.onclose=()=>{setConn(false,'retry…');setTimeout(connect,2000)}}catch(e){setConn(false,'offline')}}
 connect();pull();loadPlaylists();loadCats(true);
 setInterval(()=>{if(!ws||ws.readyState!==1)pull()},8000);
-setInterval(()=>{const pg=document.getElementById('pg-remote');if(pg&&pg.classList.contains('on'))loadQualities()},10000);
 </script></body></html>
 ''';
 

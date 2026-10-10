@@ -44,7 +44,13 @@ class _PlayerScreenState extends State<PlayerScreen> {
     _tick = Timer.periodic(
         const Duration(seconds: 1), (_) => mounted ? setState(() {}) : null);
     // Fresh tune-in flashes the info bar; AppState auto-hides it after 5s.
-    widget.state.setInfoVisible(true);
+    // Deferred past mount: initState runs inside AnimatedSwitcher's
+    // SlideTransition build, so a synchronous notifyListeners() would
+    // mark the parent ListenableBuilder dirty during build (crash).
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      widget.state.setInfoVisible(true);
+    });
     // Overlay OK (loading Cancel / error actions) arrives here — AppState
     // moves the focus index, this screen performs the focused action.
     _keySub =
@@ -83,13 +89,20 @@ class _PlayerScreenState extends State<PlayerScreen> {
     // Any remote/TV keypress reshows the info bar (if settled) and
     // restarts its 5s auto-hide clock. pokeInfo is silent when the bar
     // is already up, so this can never notify in a loop.
+    // Deferred: _onState runs inside AppState.notifyListeners dispatch,
+    // so a synchronous pokeInfo()->notify would re-enter dispatch and
+    // can mark the ListenableBuilder dirty during build (same crash).
     if (!_loading &&
         widget.state.lastKeyAt
                 .difference(DateTime.now())
                 .inSeconds
                 .abs() <
             5) {
-      widget.state.pokeInfo();
+      final s = widget.state;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        s.pokeInfo();
+      });
     }
   }
 
@@ -174,6 +187,60 @@ class _PlayerScreenState extends State<PlayerScreen> {
                                               .w600)),
                         ],
                       ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+            // Big mute badge, top-right — global until unmuted.
+            Positioned(
+              top: 26,
+              right: 28,
+              child: AnimatedOpacity(
+                opacity:
+                    (s.muted && s.playing != null)
+                        ? 1
+                        : 0,
+                duration: const Duration(
+                    milliseconds: 200),
+                child: IgnorePointer(
+                  ignoring:
+                      !(s.muted && s.playing != null),
+                  child: Container(
+                    padding:
+                        const EdgeInsets.symmetric(
+                            horizontal: 18,
+                            vertical: 14),
+                    decoration: BoxDecoration(
+                        color: const Color(
+                            0xCC0B0B0F),
+                        borderRadius:
+                            BorderRadius.circular(
+                                18),
+                        border: Border.all(
+                            color: const Color(
+                                0x66FF7A7A))),
+                    child: const Column(
+                      mainAxisSize:
+                          MainAxisSize.min,
+                      children: [
+                        Icon(
+                            Icons
+                                .volume_off_rounded,
+                            color: Color(
+                                0xFFFF7A7A),
+                            size: 46),
+                        SizedBox(height: 6),
+                        Text('MUTED',
+                            style: TextStyle(
+                                color: Color(
+                                    0xFFFF7A7A),
+                                fontSize: 11,
+                                letterSpacing: 2.5,
+                                fontWeight:
+                                    FontWeight
+                                        .w800)),
+                      ],
                     ),
                   ),
                 ),
