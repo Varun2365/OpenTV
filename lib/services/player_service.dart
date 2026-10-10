@@ -85,6 +85,17 @@ class PlayerService extends ChangeNotifier {
   int _flowStrikes = 0;
   DateTime _lastRecoveryAt =
       DateTime.fromMillisecondsSinceEpoch(0);
+  // Death memory: a pipeline that dies twice within 90s means the SERVER
+  // is throttling/blocking us after the reconnect burst (typical on free
+  // panel URLs) — not a wedged client. Survives reopens (reset only on a
+  // manual zap) so the ladder can't hammer a server that's saying no.
+  DateTime _lastDeathAt =
+      DateTime.fromMillisecondsSinceEpoch(0);
+  // Set when the watchdog (not the user) triggers a reopen, so _syncWithState
+  // preserves the ladder instead of resetting it as a fresh zap would.
+  bool _autoReopen = false;
+  // The ladder contains awaits (breather delay); never run two at once.
+  bool _flowBusy = false;
   bool _disposed = false;
 
   Future<void> init(AppState state) async {
@@ -467,14 +478,20 @@ class PlayerService extends ChangeNotifier {
     }
   }
 
-  /// Pi freeze watchdog body (every 3s). Fires only when we believe the
-  /// picture should be moving: settled past the tank, first frame on screen,
-  /// controller in playing state — yet the pipeline clock hasn't advanced
-  /// for 8s+. Recovery ladder: re-kick PLAYING twice (cheap, keeps the
-  /// pipeline), then full reopens (fresh pipeline at the live edge — the
-  /// only cure for a wedged Bin), then an honest error card. Cooldown stops
-  /// thrash; everything resets the moment position moves or the channel
-  /// changes. Zero allocation: timestamps + ints only.
+  /// Pi freeze/death watchdog body (every 3s). Two tripwires:
+  ///  - FROZEN: first frame on screen + playing state, but the position
+  ///    clock hasn't advanced for 8s+ (wedged preroll / starved live edge).
+  ///  - DEAD: getPosition throws PlatformException(nativeerror, I/O error),
+  ///    i.e. GST_STATE_CHANGE_FAILURE — the pipeline is gone. video_player's
+  ///    own 100ms poll hits the same wall as an UNHANDLED exception (log
+  ///    storm), so death pauses first to kill its timer.
+  /// Recovery ladder: re-kick PLAYING for frozen (cheap), straight to
+  /// reopen for dead (set_state on FAILURE stays FAILURE — re-kicks are
+  /// pointless), breather before reconnecting (instant reconnects read as
+  /// abuse and get throttled), honest error card at the cap. A re-death
+  /// within 90s backs off immediately — hammering a throttling server kills
+  /// the channel for good. Everything resets the moment position moves or
+  /// the user zaps. Zero allocation while healthy.
   Future<void> _checkPiFlow() async {
     if (_disposed || !_piMode) return;
     final s = _state;
@@ -489,37 +506,68 @@ class PlayerService extends ChangeNotifier {
     } catch (_) {
       return; // controller gone mid-check
     }
-    final frozenSec =
-        DateTime.now().difference(_lastFlowAt).inSeconds;
-    if (frozenSec < 8) return;
-    if (DateTime.now()
-            .difference(_lastRecoveryAt)
-            .inSeconds <
-        15) {
+    // Definitive death probe, in try/catch by design.
+    var dead = false;
+    try {
+      await c.position;
+    } on PlatformException catch (e) {
+      dead = true;
+      debugPrint('Pi flow watchdog: pipeline dead ($e)');
+    } catch (_) {}
+    if (!identical(_piCtrl, c) || s.playing?.id != ch.id) return;
+    if (dead) {
+      try {
+        await c.pause();
+      } catch (_) {} // silence the 100ms EIO storm immediately
+      if (DateTime.now().difference(_lastDeathAt).inSeconds < 90) {
+        debugPrint('Pi flow watchdog: re-died within 90s, '
+            'backing off (${ch.name})');
+        s.setPlayError(
+            'The server stopped serving this stream (throttled or expired link). Wait a bit, then retry — or pick another channel.');
+        return;
+      }
+      _lastDeathAt = DateTime.now();
+    } else {
+      if (DateTime.now().difference(_lastFlowAt).inSeconds < 8) return;
+    }
+    if (DateTime.now().difference(_lastRecoveryAt).inSeconds <
+        (dead ? 5 : 15)) {
       return; // cooling down from the last attempt
     }
-    final seq = _piSeq;
-    _flowStrikes++;
-    _lastRecoveryAt = DateTime.now();
+    if (_flowBusy) return;
+    _flowBusy = true;
     try {
+      final seq = _piSeq;
+      // Failed pipelines skip re-kicks and jump to reopen; frozen ones
+      // climb the ladder.
+      _flowStrikes += dead ? 3 : 1;
+      _lastRecoveryAt = DateTime.now();
       if (_flowStrikes <= 2) {
         // Cheap re-kick: re-issue the state change. Fixes pipelines stuck
         // between PAUSED preroll and PLAYING (the classic 1-frame freeze).
-        debugPrint('Pi flow watchdog: picture frozen ${frozenSec}s, '
+        debugPrint('Pi flow watchdog: picture frozen, '
             're-kick #$_flowStrikes (${ch.name})');
         await c.pause();
         await Future.delayed(
             const Duration(milliseconds: 400));
         if (seq != _piSeq || _disposed) return;
         if (s.playing?.id != ch.id || s.playError != null) return;
+        if (!identical(_piCtrl, c)) return;
         await c.play();
         _lastFlowAt = DateTime.now();
-      } else if (_flowStrikes <= 5) {
-        // Wedged Bin: only a fresh pipeline (new live edge) cures it.
-        // Same single path as a manual retry — old controller is disposed
-        // first, so no stacking, no audio leak, no memory growth.
-        debugPrint('Pi flow watchdog: still frozen, '
-            'reopen #$_flowStrikes (${ch.name})');
+      } else if (_flowStrikes <= 4) {
+        // Fresh pipeline at the live edge — the only cure for a failed or
+        // wedged Bin. Breather first when dead: the server just watched a
+        // pipeline die. Same single path as a manual retry — old controller
+        // disposed first, so no stacking, no audio leak, no memory growth.
+        if (dead) {
+          await Future.delayed(const Duration(seconds: 5));
+          if (seq != _piSeq || _disposed) return;
+          if (s.playing?.id != ch.id || s.playError != null) return;
+        }
+        debugPrint('Pi flow watchdog: reopening '
+            '#$_flowStrikes (${ch.name})');
+        _autoReopen = true; // preserve the ladder across the reopen
         _lastFlowAt = DateTime.now();
         _currentId = null; // force reopen of the same channel
         s.play(ch);
@@ -527,10 +575,12 @@ class PlayerService extends ChangeNotifier {
         debugPrint('Pi flow watchdog: giving up after $_flowStrikes '
             'attempts (${ch.name})');
         s.setPlayError(
-            'The picture froze repeatedly — this stream stalls on the Pi. Try a green-dot channel.');
+            'This stream keeps freezing on the Pi — retry later, or pick a green-dot channel.');
       }
     } catch (e) {
       debugPrint('Pi flow recovery failed: $e');
+    } finally {
+      _flowBusy = false;
     }
   }
 
@@ -601,8 +651,10 @@ class PlayerService extends ChangeNotifier {
 
     _lastProgress = DateTime.now();
     _lastPosition = Duration.zero;
-    _lastFlowAt = DateTime.now(); // fresh freeze clock per channel
-    _flowStrikes = 0;
+    _lastFlowAt = DateTime.now(); // fresh freeze clock per open
+    // NOTE: _flowStrikes / _lastDeathAt deliberately NOT reset here — this
+    // runs for auto-reopens too, and the ladder must survive them (it
+    // resets on manual zaps in _syncWithState and on flow in _onPiUpdate).
     s.setHasVideo(
         ctrl.value.size.width > 0 && ctrl.value.size.height > 0);
 
@@ -725,10 +777,17 @@ class PlayerService extends ChangeNotifier {
       return;
     }
     if (ch.id == _currentId) return; // already opening/open
+    final isAuto = _autoReopen; // watchdog-driven reopen, not a fresh zap
+    _autoReopen = false;
     _currentId = ch.id;
     _lastProgress = DateTime.now(); // fresh stall clock per channel
     _lastFlowAt = DateTime.now(); // fresh freeze clock per channel
-    _flowStrikes = 0;
+    if (!isAuto) {
+      // Manual zap: reset the ladder + death memory. Auto-reopens preserve
+      // both so a chronically dying stream still reaches the cap + backoff.
+      _flowStrikes = 0;
+      _lastDeathAt = DateTime.fromMillisecondsSinceEpoch(0);
+    }
     if (_piMode) {
       final seq = ++_piSeq;
       _openSeq = seq;
