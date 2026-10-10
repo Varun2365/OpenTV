@@ -27,6 +27,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'package:flutterpi_gstreamer_video_player/flutterpi_gstreamer_video_player.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -617,6 +618,34 @@ class PlayerService extends ChangeNotifier {
     }
   }
 
+  static bool _isHlsUrl(String url) =>
+      url.toLowerCase().contains('.m3u8');
+
+  /// Tank pipeline: an explicit, observable bank ahead of the decoder.
+  /// uridecodebin (the stock path) hides small internal queues and never
+  /// answers GST_QUERY_BUFFERING, so Dart can neither see nor size any bank
+  /// there. Here queue2 (a) banks [bankSecs] of media, absorbing segment
+  /// jitter and slow origins, and (b) answers buffering queries, so buffered
+  /// ranges + buffering start/end events reach Dart and the tank bar,
+  /// rebuffer pill and watchdogs become REAL instead of proxies. decodebin
+  /// (not a fixed codec chain) keeps H264/HEVC/etc. working; videoconvert
+  /// lands decoder output in the EGL-uploadable formats appsink accepts. No
+  /// audio branch — same as stock (Pi audio is a separate step). Only the
+  /// element named "sink" is required by the native side; nothing is named
+  /// "src" on purpose, so the native uri/headers/element-added hooks (built
+  /// for uridecodebin) leave this chain untouched.
+  static String _piTankPipeline(String url, int bankSecs) {
+    final loc = url.replaceAll('"', '%22');
+    final bankNs = bankSecs * 1000000000;
+    const queue =
+        'queue2 max-size-buffers=0 max-size-bytes=0 max-size-time={NS} use-buffering=true';
+    final q = queue.replaceAll('{NS}', '$bankNs');
+    final head = _isHlsUrl(url)
+        ? 'souphttpsrc location="$loc" ! hlsdemux ! $q'
+        : 'souphttpsrc location="$loc" ! $q';
+    return '$head ! decodebin ! videoconvert ! appsink name=sink sync=true';
+  }
+
   Future<void> _openPiChannel(TvChannel ch, int seq) async {
     final s = _state;
     if (s == null) return;
@@ -638,49 +667,91 @@ class PlayerService extends ChangeNotifier {
     notifyListeners(); // VideoPlayer widget drops the old texture now
 
     final n = s.prebufferSecs;
+    // Bank sizing: the explicit queue2 holds bankSecs of media ahead of the
+    // decoder. Scales with the user's tank setting, bounded so one channel
+    // never dedicates silly RAM (~2-8 Mbps → 15s ≈ 4-15MB, 60s ≈ 60MB max).
+    final bankSecs = (n * 4).clamp(15, 60);
     VideoPlayerController ctrl;
+    var tankPath = false;
+    // Attempt 1: tank pipeline (explicit bank + observable ranges).
+    // Attempt 2 (on failure): stock uridecodebin path (proven to play).
+    // Per-channel fallback — a chain the decoder dislikes degrades
+    // gracefully instead of killing the tune.
     try {
-      ctrl = VideoPlayerController.networkUrl(
-        Uri.parse(ch.streamUrl),
+      debugPrint(
+          'Pi open: tank pipeline (${ch.name}, bank=${bankSecs}s)');
+      ctrl = FlutterpiVideoPlayerController.withGstreamerPipeline(
+        _piTankPipeline(ch.streamUrl, bankSecs),
+        formatHint:
+            _isHlsUrl(ch.streamUrl) ? VideoFormat.hls : null,
         videoPlayerOptions: VideoPlayerOptions(mixWithOthers: false),
       );
-    } catch (e) {
-      if (seq != _piSeq || _disposed) return;
-      debugPrint('Pi open failed ${ch.name}: $e');
-      s.setPlayError('Could not open this stream ($e).');
-      return;
-    }
-    _piCtrl = ctrl;
-    ctrl.addListener(_onPiUpdate);
-    notifyListeners();
-
-    try {
-      await ctrl.initialize().timeout(
-          const Duration(seconds: 25));
-    } catch (e) {
-      if (seq != _piSeq || _disposed) return;
-      try {
-        ctrl.removeListener(_onPiUpdate);
-      } catch (_) {}
-      try {
-        await ctrl.dispose();
-      } catch (_) {}
-      if (identical(_piCtrl, ctrl)) _piCtrl = null;
+      tankPath = true;
+      _piCtrl = ctrl;
+      ctrl.addListener(_onPiUpdate);
       notifyListeners();
-      debugPrint('Pi init failed ${ch.name}: $e');
-      // The classic Pi setup miss: flutter-pi was compiled WITHOUT
-      // gstreamer support, so the native side of channel
-      // flutter-pi/gstreamerVideoPlayer doesn't exist. Nothing can play
-      // until flutter-pi is rebuilt (see README) — say so directly.
-      final noNativePlugin = e is MissingPluginException ||
-          '$e'.contains('gstreamerVideoPlayer');
-      s.setPlayError(noNativePlugin
-          ? 'This flutter-pi has no video plugin — rebuild flutter-pi with gstreamer support, then restart the app.'
-          : 'The Pi could not open this stream (format or network). Retry, or pick a green-dot channel.');
-      return;
+      await ctrl.initialize().timeout(const Duration(seconds: 15));
+    } catch (e) {
+      debugPrint('Pi tank pipeline failed (${ch.name}): $e — '
+          'falling back to stock path');
+      final failed = _piCtrl;
+      if (failed != null) {
+        try {
+          failed.removeListener(_onPiUpdate);
+        } catch (_) {}
+        try {
+          await failed.dispose();
+        } catch (_) {}
+        if (identical(_piCtrl, failed)) _piCtrl = null;
+      }
+      tankPath = false;
+      if (seq != _piSeq || _disposed) return;
+      if (s.playing?.id != ch.id || s.playError != null) return;
+      // Missing native plugin fails BOTH paths identically — say so once
+      // instead of running the stock attempt into the same wall.
+      if (e is MissingPluginException ||
+          '$e'.contains('gstreamerVideoPlayer')) {
+        notifyListeners();
+        s.setPlayError(
+            'This flutter-pi has no video plugin — rebuild flutter-pi with gstreamer support, then restart the app.');
+        return;
+      }
+      try {
+        debugPrint('Pi open: stock path (${ch.name})');
+        ctrl = VideoPlayerController.networkUrl(
+          Uri.parse(ch.streamUrl),
+          formatHint:
+              _isHlsUrl(ch.streamUrl) ? VideoFormat.hls : null,
+          videoPlayerOptions: VideoPlayerOptions(mixWithOthers: false),
+        );
+        _piCtrl = ctrl;
+        ctrl.addListener(_onPiUpdate);
+        notifyListeners();
+        await ctrl.initialize().timeout(const Duration(seconds: 25));
+      } catch (e2) {
+        final failed2 = _piCtrl;
+        if (failed2 != null) {
+          try {
+            failed2.removeListener(_onPiUpdate);
+          } catch (_) {}
+          try {
+            await failed2.dispose();
+          } catch (_) {}
+          if (identical(_piCtrl, failed2)) _piCtrl = null;
+        }
+        if (seq != _piSeq || _disposed) return;
+        notifyListeners();
+        debugPrint(
+            'Pi init failed ${ch.name}: both pipelines failed ($e2)');
+        s.setPlayError(
+            'The Pi could not open this stream (format or network). Retry, or pick a green-dot channel.');
+        return;
+      }
     }
     if (seq != _piSeq || _disposed) return;
     if (s.playing?.id != ch.id || s.playError != null) return;
+    debugPrint('Pi open: ${tankPath ? 'tank' : 'stock'} path live '
+        '(${ch.name})');
 
     _lastProgress = DateTime.now();
     _lastPosition = Duration.zero;
@@ -728,10 +799,10 @@ class PlayerService extends ChangeNotifier {
         final elapsed =
             DateTime.now().difference(playAt).inSeconds;
         // Progress: real buffered ranges when the backend reports them
-        // (VOD/progressive), else a flow-observed proxy — live HLS via
-        // uridecodebin never answers GST_QUERY_BUFFERING (that's the native
-        // "Could not query buffering state" spam — harmless), so ranges
-        // stay empty forever and the bar would sit at 0s without this.
+        // (tank pipeline's queue2 answers buffering queries; the stock
+        // path never does — that's the native "Could not query buffering
+        // state" spam, harmless). Falls back to a flow-observed proxy so
+        // the bar never sits at 0s.
         final end = _piBufferedEnd();
         final shown =
             end > 0 ? end : elapsed.clamp(0, n).toDouble();
