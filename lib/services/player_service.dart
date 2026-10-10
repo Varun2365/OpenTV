@@ -516,8 +516,8 @@ class PlayerService extends ChangeNotifier {
         ctrl.value.size.width > 0 && ctrl.value.size.height > 0);
 
     if (n > 0) {
-      // Tank mode: hold paused, collect N seconds into playbin's queue,
-      // then start — one initial wait instead of mid-play stutters.
+      // Tank mode: hold paused, collect N seconds into the pipeline's
+      // queue, then start — one initial wait instead of mid-play stutters.
       s.setPrebuffering(true, 0, n);
       try {
         await ctrl.pause();
@@ -526,30 +526,40 @@ class PlayerService extends ChangeNotifier {
         await ctrl.setVolume(0);
       } catch (_) {}
       final target = n.toDouble();
-      final deadline = DateTime.now()
-          .add(Duration(seconds: n + 20));
-      var lastPush = 0.0;
+      final t0 = DateTime.now();
+      final deadline = t0.add(Duration(seconds: n + 20));
+      var lastPush = -1.0;
       while (DateTime.now().isBefore(deadline)) {
         if (seq != _piSeq || _disposed) return;
         if (s.playing?.id != ch.id || s.playError != null) return;
         final end = _piBufferedEnd();
-        if ((end - lastPush).abs() >= 0.5) {
-          lastPush = end;
-          s.setPrebufferProgress(end);
+        final elapsed =
+            DateTime.now().difference(t0).inSeconds;
+        // Progress display: real buffered ranges when the backend reports
+        // them (VOD/progressive), else a time-based proxy. Live HLS via
+        // uridecodebin never answers GST_QUERY_BUFFERING (that's the native
+        // "Could not query buffering state" spam — harmless), so ranges
+        // stay empty forever and the bar would sit at 0s without this.
+        final shown =
+            end > 0 ? end : elapsed.clamp(0, n).toDouble();
+        if ((shown - lastPush).abs() >= 0.5) {
+          lastPush = shown;
+          s.setPrebufferProgress(shown);
         }
         // Progress counts — the load watchdog must not fire mid-fill.
         if (end > 0) _lastProgress = DateTime.now();
-        // Live HLS: playbin may report a sliding window; first-frame +
-        // target buffered is enough to start.
-        if (end >= target && s.hasVideo) break;
-        // Even without size yet, a full tank + timeout progress means the
-        // demuxer is alive — start playback so the first frame can arrive
-        // (size follows on the next listener tick).
-        if (end >= target &&
-            DateTime.now()
-                    .difference(s.playRequestedAt)
-                    .inSeconds >=
-                8) {
+        // Backends that DO report ranges: first-frame + full tank starts.
+        if (end >= target && (s.hasVideo || elapsed >= 8)) break;
+        // Fallback for unobservable buffers: a prerolled first frame plus
+        // a few settled seconds means the internal queues are ready — start
+        // instead of sitting on the N+20s deadline for ranges that will
+        // never arrive. The 20s first-frame watchdog below still catches a
+        // truly picture-less stream.
+        if (end <= 0 &&
+            ((s.hasVideo && elapsed >= 5) || elapsed >= 10)) {
+          debugPrint('Pi tank: buffered ranges unobservable '
+              '(live HLS), starting after ${elapsed}s settle');
+          s.setPrebufferProgress(target);
           break;
         }
         await Future.delayed(
