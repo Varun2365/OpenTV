@@ -39,6 +39,17 @@ bool get isFlutterPi {
   } catch (_) {
     return false;
   }
+  // Standard desktop embedder (X11/Wayland session) is NEVER flutter-pi —
+  // even on Raspberry Pi hardware. flutter-pi runs on the bare console
+  // with no display server; a kiosk/desktop session always sets one of
+  // these. Must come before the hardware fingerprints below (device-tree
+  // says "Raspberry" on desktop Pi OS too).
+  try {
+    if (Platform.environment['DISPLAY'] != null ||
+        Platform.environment['WAYLAND_DISPLAY'] != null) {
+      return false;
+    }
+  } catch (_) {}
   // Pi fingerprints (all best-effort, never throws):
   //  - /proc/device-tree/model contains "Raspberry Pi"
   //  - flutter-pi binary on PATH / installed location
