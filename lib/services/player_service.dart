@@ -535,7 +535,26 @@ class PlayerService extends ChangeNotifier {
     final s = _state;
     if (s == null) return;
     final ch = s.playing;
-    if (ch == null || s.playError != null || s.prebuffering) return;
+    if (ch == null || s.playError != null) return;
+    // Veil backstop FIRST (before the prebuffering early-return below):
+    // picture exists, no error, yet the gate flag is stuck (missed clear /
+    // logic bug) — force-clear rather than veil forever. Scoped to
+    // prebuffering ONLY: mid-play stall veils (isBuffering via the rebuffer
+    // driver) are legitimate and must never be cleared here. Cannot mask
+    // real loading: requires hasVideo + 60s elapsed (every legitimate gate
+    // — N+20s deadline, N≤30 — finishes well before that).
+    if (s.hasVideo && s.prebuffering) {
+      final stuckSec =
+          DateTime.now().difference(s.playRequestedAt).inSeconds;
+      if (stuckSec >= 60) {
+        debugPrint('Pi poll: gate veil stuck ${stuckSec}s with picture — '
+            'force-clearing');
+        s.setPrebuffering(false);
+        s.setBuffering(false);
+        return;
+      }
+    }
+    if (s.prebuffering) return; // gate running — veil is legitimate
     if (!s.hasVideo) return; // no first frame yet — not frozen, just loading
     final c = _piCtrl;
     if (c == null) return;
@@ -855,6 +874,12 @@ class PlayerService extends ChangeNotifier {
     }
     _lastProgress = DateTime.now();
     _lastFlowAt = DateTime.now();
+    // Tune-start buffering flag served its purpose (veil during open). Clear
+    // HERE, not in the gate — the N=0 path runs no gate at all, and without
+    // this the veil latches forever on playing video. !hasVideo still veils
+    // until first frame; the gate (N>0) and the rebuffer driver own the flag
+    // after this point.
+    s.setBuffering(false);
 
     if (n > 0) {
       // Reveal gate (was: paused tank). Same overlay UX — "Filling tank…
