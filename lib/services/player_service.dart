@@ -606,51 +606,65 @@ class PlayerService extends ChangeNotifier {
     s.setHasVideo(
         ctrl.value.size.width > 0 && ctrl.value.size.height > 0);
 
+    // LIVE-SAFE START: play immediately, never hold a live HLS pipeline
+    // paused. A paused-then-resumed live pipeline restarts behind the live
+    // edge — if those segments slid out of the playlist window the demuxer
+    // wedges (plays ~one segment / 3-4s, then freezes; long holds error
+    // outright). The OVERLAY does the waiting instead: it clears on first
+    // frame + observed flow + a short dwell, so the reveal is stable but
+    // the pipeline never goes stale. (Desktop mpv keeps its paused tank —
+    // mpv's cache handles live-resume correctly.)
+    try {
+      await ctrl.setVolume(s.muted ? 0 : s.volume.clamp(0.0, 1.0));
+    } catch (_) {}
+    final playAt = DateTime.now();
+    try {
+      await ctrl.play();
+    } catch (e) {
+      s.setPlayError('Could not start playback ($e).');
+      return;
+    }
+    _lastProgress = DateTime.now();
+    _lastFlowAt = DateTime.now();
+
     if (n > 0) {
-      // Tank mode: hold paused, collect N seconds into the pipeline's
-      // queue, then start — one initial wait instead of mid-play stutters.
+      // Reveal gate (was: paused tank). Same overlay UX — "Filling tank…
+      // Xs/Ns" — but the picture warms up behind the veil instead of the
+      // pipeline sitting paused. Clears on flow; the N+20s backstop with no
+      // observed flow becomes an error, never a dead-frame reveal.
       s.setPrebuffering(true, 0, n);
-      try {
-        await ctrl.pause();
-      } catch (_) {}
-      try {
-        await ctrl.setVolume(0);
-      } catch (_) {}
-      final target = n.toDouble();
-      final t0 = DateTime.now();
-      final deadline = t0.add(Duration(seconds: n + 20));
+      final dwell = n.clamp(0, 6); // live can't bank: long waits go stale
+      final deadline = playAt.add(Duration(seconds: n + 20));
       var lastPush = -1.0;
+      var revealed = false;
       while (DateTime.now().isBefore(deadline)) {
         if (seq != _piSeq || _disposed) return;
         if (s.playing?.id != ch.id || s.playError != null) return;
-        final end = _piBufferedEnd();
         final elapsed =
-            DateTime.now().difference(t0).inSeconds;
-        // Progress display: real buffered ranges when the backend reports
-        // them (VOD/progressive), else a time-based proxy. Live HLS via
+            DateTime.now().difference(playAt).inSeconds;
+        // Progress: real buffered ranges when the backend reports them
+        // (VOD/progressive), else a flow-observed proxy — live HLS via
         // uridecodebin never answers GST_QUERY_BUFFERING (that's the native
         // "Could not query buffering state" spam — harmless), so ranges
         // stay empty forever and the bar would sit at 0s without this.
+        final end = _piBufferedEnd();
         final shown =
             end > 0 ? end : elapsed.clamp(0, n).toDouble();
         if ((shown - lastPush).abs() >= 0.5) {
           lastPush = shown;
           s.setPrebufferProgress(shown);
         }
-        // Progress counts — the load watchdog must not fire mid-fill.
+        // Progress counts — the load watchdog must not fire mid-warmup.
         if (end > 0) _lastProgress = DateTime.now();
-        // Backends that DO report ranges: first-frame + full tank starts.
-        if (end >= target && (s.hasVideo || elapsed >= 8)) break;
-        // Fallback for unobservable buffers: a prerolled first frame plus
-        // a few settled seconds means the internal queues are ready — start
-        // instead of sitting on the N+20s deadline for ranges that will
-        // never arrive. The 20s first-frame watchdog below still catches a
-        // truly picture-less stream.
-        if (end <= 0 &&
-            ((s.hasVideo && elapsed >= 5) || elapsed >= 10)) {
-          debugPrint('Pi tank: buffered ranges unobservable '
-              '(live HLS), starting after ${elapsed}s settle');
-          s.setPrebufferProgress(target);
+        // Reveal: first frame + recently-observed flow + dwell elapsed.
+        // (Backends that report ranges can additionally gate on end, but
+        // flow is the requirement — ranges alone don't prove motion.)
+        final flowing = DateTime.now()
+                .difference(_lastFlowAt)
+                .inSeconds <
+            3;
+        if (s.hasVideo && flowing && elapsed >= dwell) {
+          revealed = true;
           break;
         }
         await Future.delayed(
@@ -659,22 +673,19 @@ class PlayerService extends ChangeNotifier {
       if (seq != _piSeq || _disposed) return;
       if (s.playing?.id != ch.id || s.playError != null) return;
       s.setPrebuffering(false);
-    }
-    if (seq != _piSeq || _disposed) return;
-    if (s.playing?.id != ch.id || s.playError != null) return;
-    try {
-      await ctrl.setVolume(s.muted ? 0 : s.volume.clamp(0.0, 1.0));
-    } catch (_) {}
-    try {
-      await ctrl.play();
-    } catch (e) {
-      s.setPlayError('Could not start playback ($e).');
-      return;
+      if (!revealed) {
+        // Backstop hit with no observed flow — surface it instead of
+        // lifting the veil onto a dead frame. The freeze watchdog below
+        // keeps working the stream if it later moves.
+        s.setPlayError(
+            'The stream connected but no picture flowed — retry, or pick a green-dot channel.');
+        return;
+      }
     }
     _lastProgress = DateTime.now();
-    // First-frame watchdog: tank done + playing but no sized frame within
-    // 20s means the decoder can't produce pictures (missing gstreamer
-    // plugin / unsupported codec) — say so instead of spinning forever.
+    // First-frame watchdog: playing but no sized frame within 20s means
+    // the decoder can't produce pictures (missing gstreamer plugin /
+    // unsupported codec) — say so instead of spinning forever.
     unawaited(Future.delayed(const Duration(seconds: 20), () {
       if (_disposed) return;
       final st = _state;
