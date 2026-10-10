@@ -2,20 +2,23 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 
+import 'package:shared_preferences/shared_preferences.dart';
+
 import '../models/custom_playlist.dart';
 import '../models/tv_channel.dart';
+import 'app_cache.dart';
 import 'remote_command.dart';
 import 'stream_health.dart';
 
-/// Which surface owns D-pad focus: the top pill nav or the channel grid.
-enum FocusZone { nav, grid }
+/// Which surface owns D-pad focus: the left category sidebar or the
+/// right channel grid.
+enum FocusZone { sidebar, grid }
 
-/// A pill in the top nav. [match] is a case-insensitive substring of the
-/// target rail title (null = scroll to top). '★' matches pasted user lists.
-class NavTab {
+/// A sidebar entry. Index 0 is always ★ Favourites, then one per rail.
+class SideItem {
   final String label;
-  final String? match;
-  const NavTab(this.label, this.match);
+  final String key;
+  const SideItem(this.label, this.key);
 }
 
 /// Global TV state. Single ChangeNotifier so both the 10-foot UI and the
@@ -96,47 +99,167 @@ class AppState extends ChangeNotifier {
   double volume = 0.8;
   bool muted = false;
 
-  // Focus position for D-pad / phone remote navigation.
-  int railIndex = 0;
-  int cardIndex = 0;
-
-  // Two focus zones: the top pill nav and the channel grid.
+  // Focus: left sidebar category vs right channel grid.
   FocusZone zone = FocusZone.grid;
-  int tabIndex = 0;
-  int activeTab = 0;
+  int sideIndex = 0; // 0 = ★ Favourites, 1..n = rails[sideIndex-1]
+  int gridIndex = 0; // flat index into the selected category
+  int gridColumns = 6; // set by layout (MediaQuery) each build
 
-  // Per-category cursor memory (keyed by rail title so it survives list
-  // inserts) + hold-glide speed for the phone remote (keys/sec).
-  final Map<String, int> _railCursors = {};
+  // Per-category cursor memory (keyed by 'fav'/rail title so it survives
+  // list inserts) + hold-glide speed for the phone remote (keys/sec).
+  final Map<String, int> _sideCursors = {};
   int repeatRate = 6;
+
+  // Favourite channel ids, most-recent first. Tiny — prefs is fine.
+  List<String> favouriteIds = [];
+
+  List<SideItem> get sideItems => [
+        const SideItem('Favourites', 'fav'),
+        for (final r in rails) SideItem(r.title, r.title),
+      ];
+
+  /// Channels of the selected sidebar category (favs or the rail).
+  List<TvChannel> get sidebarChannels {
+    if (rails.isEmpty) return const [];
+    if (sideIndex <= 0) return favouriteChannels;
+    final i = (sideIndex - 1).clamp(0, rails.length - 1);
+    return rails[i].channels;
+  }
+
+  String get sideTitle {
+    if (sideIndex <= 0) return 'Favourites';
+    if (rails.isEmpty) return 'TV';
+    final i = (sideIndex - 1).clamp(0, rails.length - 1);
+    return rails[i].title;
+  }
+
+  TvChannel? get focusedChannel {
+    final list = sidebarChannels;
+    if (list.isEmpty) return null;
+    return list[gridIndex.clamp(0, list.length - 1)];
+  }
+
+  List<TvChannel> get favouriteChannels => [
+        for (final id in favouriteIds)
+          for (final c in allChannels.where((c) => c.id == id).take(1)) c
+      ];
+
+  bool isFav(String id) => favouriteIds.contains(id);
+
+  Future<void> toggleFavourite(String id) async {
+    if (favouriteIds.contains(id)) {
+      favouriteIds.remove(id);
+    } else {
+      favouriteIds.insert(0, id);
+    }
+    notifyListeners();
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setStringList('opentv_favs', favouriteIds);
+    } catch (_) {}
+  }
+
+  Future<void> loadFavourites() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      favouriteIds =
+          List<String>.from(prefs.getStringList('opentv_favs') ?? []);
+    } catch (_) {}
+  }
+
+  /// The saved list behind a '★ name' rail title, if any (for its icon).
+  CustomPlaylist? playlistForRail(String railTitle) {
+    if (!railTitle.startsWith('★ ')) return null;
+    final name = railTitle.substring(2);
+    for (final p in customPlaylists) {
+      if (p.name == name) return p;
+    }
+    return null;
+  }
+
+  /// Nuclear option for the remote's CLEAR LISTS vault: saved lists,
+  /// favourites, health scores and playlist caches go; the base catalog
+  /// and playback settings stay.
+  Future<void> clearAllData() async {
+    customPlaylists = [];
+    favouriteIds = [];
+    healthById.clear();
+    _sideCursors.clear();
+    sideIndex = 0;
+    gridIndex = 0;
+    _rebuild();
+    notifyListeners();
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove('opentv_favs');
+      await prefs.remove('opentv_health_v1');
+      await prefs.remove('opentv_m3u_cache_time_v1');
+    } catch (_) {}
+    try {
+      await AppCache.writeText('custom_playlists.json', '[]');
+      await AppCache.writeText('m3u_cache.txt', '');
+    } catch (_) {}
+  }
 
   void setRepeatRate(int v) {
     repeatRate = v.clamp(2, 12);
     notifyListeners();
   }
 
-  /// Switch rails with cursor memory: the old category keeps its position,
-  /// the new one restores its own — never the 18th element elsewhere.
-  void _moveRail(int next) {
-    _saveCursor();
-    railIndex = next.clamp(0, rails.length - 1);
-    _restoreCursor();
-  }
+  // Web-remote link state (drives the QR auto-show on the TV).
+  bool remoteConnected = false;
+  int remoteClients = 0;
 
-  void _saveCursor() {
-    if (rails.isEmpty) return;
-    final r = railIndex.clamp(0, rails.length - 1);
-    _railCursors[rails[r].title] = cardIndex;
-  }
-
-  void _restoreCursor() {
-    if (rails.isEmpty) {
-      cardIndex = 0;
+  void setRemoteStatus(
+      {required bool connected, required int clients}) {
+    if (remoteConnected == connected &&
+        remoteClients == clients) {
       return;
     }
-    final r = railIndex.clamp(0, rails.length - 1);
-    cardIndex = (_railCursors[rails[r].title] ?? 0)
-        .clamp(0, rails[r].channels.length - 1);
+    remoteConnected = connected;
+    remoteClients = clients;
+    notifyListeners();
+  }
+
+  // Pop the QR dialog on the TV whenever no web remote is linked.
+  bool autoQr = true;
+
+  void setAutoQr(bool v) {
+    if (autoQr == v) return;
+    autoQr = v;
+    notifyListeners();
+  }
+
+  /// Switch sidebar categories with cursor memory: the old category keeps
+  /// its position (keyed by 'fav'/title, so it survives list inserts),
+  /// the new one restores its own — never the 18th element elsewhere.
+  void _moveSide(int next) {
+    _saveSideCursor();
+    sideIndex =
+        next.clamp(0, sideItems.length - 1);
+    _restoreSideCursor();
+  }
+
+  void _saveSideCursor() {
+    _sideCursors[_sideKey()] = gridIndex;
+  }
+
+  void _restoreSideCursor() {
+    final list = sidebarChannels;
+    gridIndex = (_sideCursors[_sideKey()] ?? 0)
+        .clamp(0, list.isEmpty ? 0 : list.length - 1);
+  }
+
+  String _sideKey() =>
+      sideIndex <= 0 ? 'fav' : rails[(sideIndex - 1).clamp(0, rails.length - 1)].title;
+
+  /// Tap a sidebar category: show it and dive straight into its grid.
+  void selectSide(int i) {
+    _saveSideCursor();
+    sideIndex = i.clamp(0, sideItems.length - 1);
+    _restoreSideCursor();
+    zone = FocusZone.grid;
+    notifyListeners();
   }
 
   // Remote server info (shown on TV + QR).
@@ -158,12 +281,10 @@ class AppState extends ChangeNotifier {
     _rebuild();
     catalogLoading = false;
     if (status.isNotEmpty) catalogStatus = status;
-    railIndex = 0;
-    cardIndex = 0;
-    _railCursors.clear();
+    sideIndex = 0;
+    gridIndex = 0;
+    _sideCursors.clear();
     zone = FocusZone.grid;
-    tabIndex = 0;
-    activeTab = 0;
     notifyListeners();
   }
 
@@ -206,7 +327,6 @@ class AppState extends ChangeNotifier {
       for (final p in customPlaylists) ...p.channels,
       ..._baseChannels,
     ];
-    _clampTabs();
     _resortByHealth();
   }
 
@@ -216,11 +336,8 @@ class AppState extends ChangeNotifier {
     if (m.isEmpty) return;
     healthById.addAll(m);
     _resortByHealth();
-    railIndex = railIndex.clamp(0, rails.isEmpty ? 0 : rails.length - 1);
-    if (rails.isNotEmpty) {
-      cardIndex = cardIndex.clamp(
-          0, rails[railIndex].channels.length - 1);
-    }
+    sideIndex = sideIndex.clamp(0, sideItems.length - 1);
+    _restoreSideCursor();
     notifyListeners();
   }
 
@@ -256,13 +373,6 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
-  TvChannel? get focusedChannel {
-    if (rails.isEmpty) return null;
-    final r = rails[railIndex.clamp(0, rails.length - 1)];
-    if (r.channels.isEmpty) return null;
-    return r.channels[cardIndex.clamp(0, r.channels.length - 1)];
-  }
-
   void play(TvChannel ch) {
     playing = ch;
     isPlaying = true;
@@ -275,6 +385,11 @@ class AppState extends ChangeNotifier {
     prebufferedSec = 0;
     prebufferTarget = 0;
     playRequestedAt = DateTime.now();
+    // Fresh tune-in always flashes the info bar (auto-hides in 5s).
+    infoVisible = true;
+    _armInfoTimer();
+    playerBtnIndex = 0;
+    playerFocusVisible = false; // Cancel starts unfocused; Down focuses it
     notifyListeners();
   }
 
@@ -288,6 +403,8 @@ class AppState extends ChangeNotifier {
     playError = null;
     prebuffering = false;
     prebufferedSec = 0;
+    infoVisible = false;
+    _infoTimer?.cancel();
     notifyListeners();
   }
 
@@ -302,6 +419,8 @@ class AppState extends ChangeNotifier {
     final raw = (e == null || e.trim().isEmpty) ? null : e.trim();
     playError = raw == null ? null : _friendlyError(raw);
     if (playError != null) isBuffering = false;
+    playerBtnIndex = 0; // error card always opens focused on Retry
+    if (playError != null) playerFocusVisible = true;
     notifyListeners();
   }
 
@@ -394,6 +513,104 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
+  // Player overlay button focus: while the loading spinner or the error
+  // card is up, the TV D-pad (and the phone remote) drives THESE buttons
+  // instead of the home grid behind — otherwise Cancel/Retry are
+  // unreachable without a mouse.
+  int playerBtnIndex = 0;
+  // Whether the overlay focus is currently shown: Down focuses the
+  // current button, Up unfocuses it again (loading opens unfocused).
+  bool playerFocusVisible = false;
+
+  bool get playerLoading =>
+      playing != null &&
+      playError == null &&
+      (isBuffering || !hasVideo || prebuffering);
+
+  bool get errorHasAudioFix =>
+      playError != null &&
+      playError!.toLowerCase().contains('audio');
+
+  /// Buttons on the current player overlay: loading = [Cancel],
+  /// error = [Retry, Channels] + [Video only] for audio failures.
+  int get playerActionCount {
+    if (playing == null) return 0;
+    if (playError != null) return errorHasAudioFix ? 3 : 2;
+    if (playerLoading) return 1;
+    return 0;
+  }
+
+  /// D-pad inside a player overlay. Returns true when the key was
+  /// consumed (focus moved or overlay dismissed). OK travels on via
+  /// keyStream and the player screen activates playerBtnIndex, so this
+  /// class stays free of player imports.
+  bool _movePlayerOverlay(RemoteKey key) {
+    final n = playerActionCount;
+    if (n == 0) return false;
+    switch (key) {
+      case RemoteKey.left:
+        playerBtnIndex = (playerBtnIndex - 1 + n) % n;
+        playerFocusVisible = true;
+        return true;
+      case RemoteKey.right:
+        playerBtnIndex = (playerBtnIndex + 1) % n;
+        playerFocusVisible = true;
+        return true;
+      case RemoteKey.down:
+        playerFocusVisible = true; // focus Cancel / current button
+        return true;
+      case RemoteKey.up:
+        playerFocusVisible = false; // unfocus again
+        return true;
+      case RemoteKey.ok:
+        return true; // screen activates playerBtnIndex via keyStream
+      case RemoteKey.back:
+      case RemoteKey.home:
+        stop(); // Cancel / exit to channels
+        return true;
+      default:
+        return false; // volume etc. fall through to the player listener
+    }
+  }
+
+  // Player bottom info bar: TV tap or the phone remote toggles it, and it
+  // always auto-hides 5s after being shown. One timer, restarted on show.
+  bool infoVisible = true;
+  Timer? _infoTimer;
+  bool _dead = false;
+
+  void _armInfoTimer() {
+    _infoTimer?.cancel();
+    _infoTimer = Timer(const Duration(seconds: 5), () {
+      if (_dead) return;
+      infoVisible = false;
+      notifyListeners();
+    });
+  }
+
+  void setInfoVisible(bool v) {
+    infoVisible = v;
+    if (v) {
+      _armInfoTimer();
+    } else {
+      _infoTimer?.cancel();
+    }
+    notifyListeners();
+  }
+
+  void toggleInfo() => setInfoVisible(!infoVisible);
+
+  /// User activity (D-pad, tap): show the bar if hidden and restart the
+  /// 5s auto-hide clock. Silent when already visible — the caller's own
+  /// notify covers the rebuild, so this never notifies in a loop.
+  void pokeInfo() {
+    if (!infoVisible) {
+      setInfoVisible(true);
+    } else {
+      _armInfoTimer();
+    }
+  }
+
   void handleKey(RemoteKey key) {
     lastKey = key;
     lastKeyAt = DateTime.now();
@@ -402,6 +619,15 @@ class AppState extends ChangeNotifier {
         (key == RemoteKey.channelUp ||
             key == RemoteKey.channelDown)) {
       _zap(key == RemoteKey.channelUp ? -1 : 1);
+      _keyCtrl.add(key);
+      notifyListeners();
+      return;
+    }
+    // A player overlay (loading / error) eats the D-pad so its buttons
+    // stay reachable from the couch and the phone remote.
+    if (playing != null &&
+        playerActionCount > 0 &&
+        _movePlayerOverlay(key)) {
       _keyCtrl.add(key);
       notifyListeners();
       return;
@@ -421,132 +647,87 @@ class AppState extends ChangeNotifier {
     play(next);
   }
 
-  /// Pills shown in the top nav: Home + one per matching rail family.
-  List<NavTab> get navTabs {
-    const all = [
-      NavTab('Home', null),
-      NavTab('India', 'india'),
-      NavTab('Global', 'global'),
-      NavTab('News', 'news'),
-      NavTab('Sports', 'sports'),
-      NavTab('Music', 'music'),
-      NavTab('Kids', 'kid'),
-      NavTab('Movies', 'movie'),
-      NavTab('My Lists', '★'),
-    ];
-    return [
-      for (final t in all)
-        if (t.match == null ||
-            rails.any((r) => r.title
-                .toLowerCase()
-                .contains(t.match!.toLowerCase())))
-          t
-    ];
-  }
-
-  void _clampTabs() {
-    final n = navTabs.length;
-    if (n == 0) {
-      tabIndex = 0;
-      activeTab = 0;
-      return;
-    }
-    tabIndex = tabIndex.clamp(0, n - 1);
-    activeTab = activeTab.clamp(0, n - 1);
-  }
-
-  /// Activate the focused pill: jump the grid to its rail.
-  void activateTab() {
-    _clampTabs();
-    if (navTabs.isEmpty) return;
-    _saveCursor();
-    activeTab = tabIndex;
-    final match = navTabs[tabIndex].match;
-    if (match == null) {
-      railIndex = 0;
-    } else {
-      final i = rails.indexWhere((r) => r.title
-          .toLowerCase()
-          .contains(match.toLowerCase()));
-      if (i >= 0) railIndex = i;
-    }
-    _restoreCursor();
-    zone = FocusZone.grid;
-  }
-
   void _applyFocusMove(RemoteKey key) {
-    if (rails.isEmpty) return;
-    _clampTabs();
-    if (zone == FocusZone.nav) {
-      final n = navTabs.length;
+    final n = sideItems.length;
+    if (n == 0) return;
+    sideIndex = sideIndex.clamp(0, n - 1);
+    if (zone == FocusZone.sidebar) {
       switch (key) {
-        case RemoteKey.left:
-          if (n > 0) {
-            tabIndex = (tabIndex - 1) % n;
-            activeTab = tabIndex;
-          }
-          break;
-        case RemoteKey.right:
-          if (n > 0) {
-            tabIndex = (tabIndex + 1) % n;
-            activeTab = tabIndex;
-          }
+        case RemoteKey.up:
+          _moveSide((sideIndex - 1) % n); // wrap the sidebar
           break;
         case RemoteKey.down:
-          zone = FocusZone.grid;
+          _moveSide((sideIndex + 1) % n); // wrap the sidebar
           break;
+        case RemoteKey.right:
         case RemoteKey.ok:
-          activateTab();
+          zone = FocusZone.grid; // dive into the channels
           break;
         case RemoteKey.back:
+          break; // already top-level
         case RemoteKey.home:
-          stop();
-          zone = FocusZone.grid;
+          _moveSide(0);
           break;
         default:
           break;
       }
       return;
     }
+    final list = sidebarChannels;
+    if (list.isEmpty) {
+      // Empty category (e.g. no favourites yet): only way out is left.
+      if (key == RemoteKey.left ||
+          key == RemoteKey.back ||
+          key == RemoteKey.home) {
+        zone = FocusZone.sidebar;
+      }
+      return;
+    }
+    final cols = gridColumns < 1 ? 1 : gridColumns;
+    final col = gridIndex % cols;
     switch (key) {
       case RemoteKey.up:
-        if (railIndex == 0) {
-          _saveCursor();
-          zone = FocusZone.nav; // rise into the pill nav
-        } else {
-          _moveRail(railIndex - 1);
-        }
+        // Top row stays put — the ONLY way to the sidebar is left
+        // off a left-edge tile. No more accidental jumps.
+        gridIndex =
+            (gridIndex - cols).clamp(0, list.length - 1);
+        _saveSideCursor();
         break;
       case RemoteKey.down:
-        _moveRail(
-            (railIndex + 1).clamp(0, rails.length - 1));
+        gridIndex =
+            (gridIndex + cols).clamp(0, list.length - 1);
+        _saveSideCursor();
         break;
       case RemoteKey.left:
-        final len = rails[railIndex].channels.length;
-        cardIndex = (cardIndex - 1) % len; // wrap within rail
-        _saveCursor();
+        if (col == 0) {
+          _saveSideCursor();
+          zone = FocusZone.sidebar; // step back to categories
+        } else {
+          gridIndex--;
+          _saveSideCursor();
+        }
         break;
       case RemoteKey.right:
-        final len = rails[railIndex].channels.length;
-        cardIndex = (cardIndex + 1) % len; // wrap within rail
-        _saveCursor();
+        gridIndex =
+            (gridIndex + 1).clamp(0, list.length - 1);
+        _saveSideCursor();
         break;
       case RemoteKey.channelUp:
-        _moveRail(
-            (railIndex - 1).clamp(0, rails.length - 1));
+        _moveSide(sideIndex - 1);
         break;
       case RemoteKey.channelDown:
-        _moveRail(
-            (railIndex + 1).clamp(0, rails.length - 1));
+        _moveSide(sideIndex + 1);
         break;
       case RemoteKey.ok:
         final f = focusedChannel;
         if (f != null) play(f);
         break;
       case RemoteKey.back:
+        zone = FocusZone.sidebar;
+        break;
       case RemoteKey.home:
-        stop();
-        zone = FocusZone.grid;
+        _saveSideCursor();
+        zone = FocusZone.sidebar;
         break;
       default:
         break; // volume / transport handled by player listener
@@ -555,6 +736,8 @@ class AppState extends ChangeNotifier {
 
   @override
   void dispose() {
+    _dead = true;
+    _infoTimer?.cancel();
     _keyCtrl.close();
     super.dispose();
   }
