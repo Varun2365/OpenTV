@@ -129,6 +129,11 @@ class _PlayerScreenState extends State<PlayerScreen> {
           children: [
             Video(
                 controller: widget.player.videoController,
+                // Remote "stretch" toggle: fill the screen or keep the
+                // original shape. Rebuilds live via the state listener.
+                fit: s.stretchVideo
+                    ? BoxFit.fill
+                    : BoxFit.contain,
                 controls: NoVideoControls),
             // Rebuffer pill (video visible underneath).
             Positioned(

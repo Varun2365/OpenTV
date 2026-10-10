@@ -285,6 +285,16 @@ class AppState extends ChangeNotifier {
   // Pop the QR dialog on the TV whenever no web remote is linked.
   bool autoQr = true;
 
+  // Stretch video to fill the screen (BoxFit.fill) vs original aspect
+  // (BoxFit.contain). Remote setting, persisted, applies instantly.
+  bool stretchVideo = false;
+
+  void setStretchVideo(bool v) {
+    if (stretchVideo == v) return;
+    stretchVideo = v;
+    notifyListeners();
+  }
+
   void setAutoQr(bool v) {
     if (autoQr == v) return;
     autoQr = v;
@@ -763,6 +773,45 @@ class AppState extends ChangeNotifier {
         ? allChannels.first
         : allChannels[(i + dir) % allChannels.length];
     play(next);
+  }
+
+  /// The "current list" behind the player screen: the rail that holds
+  /// the playing channel (custom ★ list first, else any preset rail),
+  /// falling back to the raw playlist / full catalog. Feeds the web
+  /// remote's transparent player-list sidebar while watching.
+  List<TvChannel> get playerListChannels {
+    final pid = playing?.id;
+    if (pid == null) return const [];
+    for (final r in rails) {
+      for (final c in r.channels) {
+        if (c.id == pid) return r.channels;
+      }
+    }
+    for (final p in customPlaylists) {
+      for (final c in p.channels) {
+        if (c.id == pid) return p.channels;
+      }
+    }
+    for (final c in allChannels) {
+      if (c.id == pid) return allChannels;
+    }
+    return const [];
+  }
+
+  String get playerListTitle {
+    final pid = playing?.id;
+    if (pid == null) return '';
+    for (final r in rails) {
+      for (final c in r.channels) {
+        if (c.id == pid) return r.title;
+      }
+    }
+    for (final p in customPlaylists) {
+      for (final c in p.channels) {
+        if (c.id == pid) return p.name;
+      }
+    }
+    return 'All channels';
   }
 
   void _applyFocusMove(RemoteKey key) {

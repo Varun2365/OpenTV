@@ -60,6 +60,8 @@ class PlayerService {
           prefs.getInt('opentv_repeat_rate') ?? 6);
       state.setAutoQr(
           prefs.getBool('opentv_auto_qr') ?? true);
+      state.setStretchVideo(
+          prefs.getBool('opentv_stretch') ?? false);
       state.setShowPresets(
           prefs.getBool('opentv_show_presets') ?? true);
     } catch (_) {}

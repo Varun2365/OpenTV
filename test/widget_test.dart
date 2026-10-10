@@ -229,8 +229,7 @@ void main() {
     expect(s.playlistForRail('India'), isNull); // built-ins have none
   });
 
-  test('preset toggle hides built-ins, keeps user lists', () {
-    final s = _twoRail();
+  test('preset toggle hides built-ins, keeps user lists', () {    final s = _twoRail();
     expect(s.sideItems.length, 3); // Favourites + 2 presets
     expect(s.showPresets, true);
     s.setShowPresets(false);
@@ -243,5 +242,14 @@ void main() {
     s.setShowPresets(true);
     expect(s.sideItems.length, 3);
     expect(s.isFav('a'), true);
+  });
+
+  test('stretch toggle defaults off and flips', () {
+    final s = AppState();
+    expect(s.stretchVideo, false);
+    s.setStretchVideo(true);
+    expect(s.stretchVideo, true);
+    s.setStretchVideo(true); // idempotent, no crash
+    expect(s.stretchVideo, true);
   });
 }

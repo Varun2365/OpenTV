@@ -284,6 +284,17 @@ class LocalRemoteServer {
               ? null
               : _chJson(s, s.focusedChannel!),
         }));
+      } else if (req.method == 'GET' && path == '/api/playerlist') {
+        // Channels of the list currently playing (for the remote's
+        // transparent player sidebar). Empty when nothing is playing.
+        final list = s.playerListChannels;
+        res.headers.contentType = ContentType.json;
+        res.write(jsonEncode({
+          'playingId': s.playing?.id,
+          'title': s.playerListTitle,
+          'count': list.length,
+          'channels': [for (final c in list) _chJson(s, c)],
+        }));
       } else if (req.method == 'GET' && path == '/api/categories') {
         // Remote shows ONLY user-added lists — no built-in rails.
         res.headers.contentType = ContentType.json;
@@ -533,6 +544,7 @@ class LocalRemoteServer {
           'repeatRate': s.repeatRate,
           'autoQr': s.autoQr,
           'showPresets': s.showPresets,
+          'stretchVideo': s.stretchVideo,
         }));
       } else if (req.method == 'POST' && path == '/api/settings') {
         final body = await utf8.decoder.bind(req).join();
@@ -558,6 +570,12 @@ class LocalRemoteServer {
           if (m.containsKey('showPresets')) {
             s.setShowPresets(showPresets);
           }
+          final sv = m['stretchVideo'];
+          final stretch =
+              sv == true || '$sv' == '1' || '$sv' == 'true';
+          if (m.containsKey('stretchVideo')) {
+            s.setStretchVideo(stretch);
+          }
           try {
             final prefs =
                 await SharedPreferences.getInstance();
@@ -570,6 +588,10 @@ class LocalRemoteServer {
               await prefs.setBool(
                   'opentv_show_presets', s.showPresets);
             }
+            if (m.containsKey('stretchVideo')) {
+              await prefs.setBool(
+                  'opentv_stretch', s.stretchVideo);
+            }
           } catch (_) {}
           res.headers.contentType = ContentType.json;
           res.write(jsonEncode({
@@ -578,6 +600,7 @@ class LocalRemoteServer {
             'repeatRate': r,
             'autoQr': s.autoQr,
             'showPresets': s.showPresets,
+            'stretchVideo': s.stretchVideo,
           }));
         } catch (e) {
           res.statusCode = 400;
@@ -927,6 +950,35 @@ border-radius:0;background:transparent;padding:11px 4px;margin:0;min-height:62px
 .favChip img{width:30px;height:30px;border-radius:50%;object-fit:cover;background:var(--deep);flex:0 0 auto}
 .favChip span.nm{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .favChip .x{color:var(--gold);font-size:14px;flex:0 0 auto;padding:4px 6px}
+#chanBtnWrap{margin-top:12px;display:none}
+#chanBtn{width:100%;background:var(--gold);color:var(--gold-ink);border:0;font-weight:800;
+box-shadow:0 6px 22px rgba(255,179,56,.25)}
+#chanBtn:active{background:#FFC25E}
+#plistScrim{position:fixed;inset:0;background:rgba(0,0,0,.45);backdrop-filter:blur(2px);
+-webkit-backdrop-filter:blur(2px);opacity:0;pointer-events:none;transition:opacity .25s ease;z-index:60}
+#plistScrim.show{opacity:1;pointer-events:auto}
+#plistBar{position:fixed;top:0;bottom:0;right:max(0px,calc(50vw - 240px));width:min(340px,88vw);
+background:rgba(16,16,22,.82);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
+border-left:1px solid var(--line);z-index:70;display:flex;flex-direction:column;
+transform:translateX(106%);transition:transform .3s cubic-bezier(.32,.72,.24,1);
+box-shadow:-18px 0 60px rgba(0,0,0,.5)}
+#plistBar.open{transform:none}
+.plistHead{display:flex;align-items:center;gap:10px;padding:14px 14px 12px;border-bottom:1px solid var(--line)}
+.plistHead .t{font-size:15px;font-weight:800;min-width:0}
+.plistHead .t small{display:block;font-size:11px;color:var(--muted);font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#plistClose{margin-left:auto;width:38px;height:38px;min-height:0;padding:0;border-radius:11px;font-size:16px;line-height:1;flex:0 0 auto}
+#plistRows{flex:1;overflow-y:auto;padding:8px 8px calc(20px + env(safe-area-inset-bottom));-webkit-overflow-scrolling:touch}
+.prow{display:flex;align-items:center;gap:11px;width:100%;text-align:left;border:1px solid transparent;
+border-radius:14px;background:transparent;padding:9px 10px;margin:0 0 2px;min-height:58px;min-width:0}
+.prow img{width:40px;height:40px;border-radius:10px;object-fit:cover;background:var(--deep);flex:0 0 auto}
+.prow .pfb{width:40px;height:40px;border-radius:10px;background:var(--deep);display:flex;align-items:center;justify-content:center;font-size:19px;flex:0 0 auto}
+.prow .ptx{min-width:0;flex:1}
+.prow .ptx b{font-size:13.5px;display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.prow .ptx span{font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:block}
+.prow .pdot{width:8px;height:8px;border-radius:50%;flex:0 0 auto}
+.prow.sel{background:var(--gold-soft);border-color:rgba(255,179,56,.45)}
+.prow.sel .ptx b{color:var(--gold)}
+.plistHint{padding:10px 14px;border-top:1px solid var(--line);font-size:11px;color:var(--muted);text-align:center;line-height:1.5}
 @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 </style></head><body>
 <div id="scrim" onclick="closeDrawer()"></div>
@@ -951,6 +1003,7 @@ border-radius:0;background:transparent;padding:11px 4px;margin:0;min-height:62px
 <main id="pages">
 <section class="page on" id="pg-remote"><div class="padX">
 <div class="now"><p class="eyebrow"><span class="liveDot"></span>Now playing</p><h2 id="np">—</h2><p id="npsub">Pick a channel from Channels</p>
+<div id="chanBtnWrap"><button id="chanBtn" onclick="openPlayerList()">☰ Channels — this list</button></div>
 </div>
 <div class="deck"><div class="transport" style="margin-top:0;margin-bottom:14px">
 <button onclick="key('playPause')" id="ppBtn">⏯ Play</button>
@@ -1038,6 +1091,7 @@ border-radius:0;background:transparent;padding:11px 4px;margin:0;min-height:62px
 <input id="repRange" type="range" min="2" max="12" step="1" value="6" oninput="repPreview(this.value)"/>
 <label style="display:flex;align-items:center;gap:10px;margin:14px 0 2px;font-size:13px;color:var(--paper)"><input id="autoQr" type="checkbox" checked onchange="saveQrOnly(this.checked)" style="width:22px;height:22px;accent-color:var(--gold);flex:0 0 auto"/><span>Pop up the TV QR code when no phone is linked</span></label>
 <label style="display:flex;align-items:center;gap:10px;margin:10px 0 2px;font-size:13px;color:var(--paper)"><input id="showPresets" type="checkbox" checked onchange="savePresetsOnly(this.checked)" style="width:22px;height:22px;accent-color:var(--gold);flex:0 0 auto"/><span>Show built-in categories in the TV sidebar</span></label>
+<label style="display:flex;align-items:center;gap:10px;margin:10px 0 2px;font-size:13px;color:var(--paper)"><input id="stretchVideo" type="checkbox" onchange="saveStretchOnly(this.checked)" style="width:22px;height:22px;accent-color:var(--gold);flex:0 0 auto"/><span>Stretch video to fill the screen (off = original shape)</span></label>
 <div class="hint">5–10s is the sweet spot on Pi 4. Bigger tank = longer start wait + more RAM.</div></div>
 <div class="pl" style="margin-top:12px;border-color:rgba(255,90,90,.35)"><p class="eyebrow" style="color:var(--red)">Danger zone</p><h3 style="margin:8px 0 4px">Clear everything</h3>
 <p class="sub">Wipes all lists, favourites and caches on the TV. Cannot be undone.</p>
@@ -1052,6 +1106,13 @@ border-radius:0;background:transparent;padding:11px 4px;margin:0;min-height:62px
 <div class="dlgActs"><button class="ghost" onclick="closeWipe()">Keep</button><button class="danger" id="wipeYes" onclick="doWipe()" disabled>Wipe all</button></div>
 </div>
 </div>
+<div id="plistScrim" onclick="closePlayerList()"></div>
+<aside id="plistBar" aria-label="Channels in this list">
+<div class="plistHead"><div class="t"><span id="plistTitle">Channels</span><small id="plistSub"></small></div>
+<button id="plistClose" onclick="closePlayerList()" aria-label="Close channels">✕</button></div>
+<div id="plistRows" role="listbox" aria-label="Channels"></div>
+<div class="plistHint">▲ ▼ move • OK plays + closes</div>
+</aside>
 </main>
 <script>
 let ws=null,deb=null,cats=[],curCat=0,catsSig='';
@@ -1065,16 +1126,21 @@ function closeDrawer(){document.getElementById('drawer').classList.remove('open'
 document.getElementById('scrim').classList.remove('show');
 document.getElementById('burger').setAttribute('aria-expanded','false')}
 function toggleDrawer(){document.getElementById('drawer').classList.contains('open')?closeDrawer():openDrawer()}
-document.addEventListener('keydown',e=>{if(e.key==='Escape'){closeAdd();closeCfm();closeIcons();closeWipe();closeDrawer()}});
+document.addEventListener('keydown',e=>{if(e.key==='Escape'){closeAdd();closeCfm();closeIcons();closeWipe();closeDrawer();closePlayerList()}
+ if(plistOpen){if(e.key==='ArrowUp'){e.preventDefault();plistMove(-1)}else if(e.key==='ArrowDown'){e.preventDefault();plistMove(1)}else if(e.key==='Enter'){e.preventDefault();plistOk()}}});
 document.getElementById('pg-remote').addEventListener('contextmenu',e=>e.preventDefault());
 let holdTimer=null,holdInt=null,holdKey=null,repeatRate=6,tvZone='grid';
 function hold(k,e,vert){if(e&&e.preventDefault)e.preventDefault();key(k);holdKey=k;
  clearTimeout(holdTimer);clearInterval(holdInt);
+ if(plistOpen&&(k==='up'||k==='down')){holdTimer=setTimeout(()=>{holdInt=setInterval(()=>{if(holdKey)key(holdKey)},1000/Math.max(2,repeatRate))},350);return}
  if(vert&&tvZone!=='grid')return; // vertical glide only inside the channel grid
  holdTimer=setTimeout(()=>{holdInt=setInterval(()=>{if(holdKey)key(holdKey)},1000/Math.max(2,repeatRate))},350)}
 function unhold(){holdKey=null;clearTimeout(holdTimer);clearInterval(holdInt)}
 function repPreview(v){const el=document.getElementById('repVal');if(el)el.innerHTML=v+'/s';repeatRate=parseInt(v)||6}
 function key(k){
+ if(plistOpen&&(k==='up'||k==='down')){plistMove(k==='up'?-1:1);return}
+ if(plistOpen&&k==='ok'){plistOk();return}
+ if(plistOpen&&k==='back'){closePlayerList();return}
  if(ws&&ws.readyState===1){ws.send(JSON.stringify({type:'key',key:k}));return}
  fetch('/api/key',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:k})}).then(pull)}
 function play(id){
@@ -1102,7 +1168,37 @@ function paint(j){
  document.getElementById('infoBtn').classList.toggle('on',!!j.infoVisible);
  document.getElementById('muteBtn').classList.toggle('on',!!j.muted);
  document.getElementById('muteBtn').textContent=j.muted?'🔇 Muted — tap to unmute':'Mute';
+ const hasPlaying=!!(j.playing&&j.playing.id);
+ const cbw=document.getElementById('chanBtnWrap');if(cbw)cbw.style.display=hasPlaying?'block':'none';
+ if(!hasPlaying&&plistOpen)closePlayerList();
  setConn(true,'live')}
+let plistOpen=false,plist=[],plistSel=0;
+async function openPlayerList(){try{const r=await fetch('/api/playerlist');const j=await r.json();
+ plist=j.channels||[];plistSel=0;
+ document.getElementById('plistTitle').textContent=j.title||'Channels';
+ document.getElementById('plistSub').textContent=(j.count||plist.length)+' channels • this list';
+ const pid=j.playingId;
+ for(let i=0;i<plist.length;i++){if(plist[i].id===pid){plistSel=i;break}}
+ renderPlist();
+ plistOpen=true;
+ document.getElementById('plistBar').classList.add('open');
+ document.getElementById('plistScrim').classList.add('show');
+ requestAnimationFrame(()=>{const el=document.getElementById('prow-'+plistSel);if(el)el.scrollIntoView({block:'center'})})}catch(e){}}
+function closePlayerList(){plistOpen=false;
+ const b=document.getElementById('plistBar');if(b)b.classList.remove('open');
+ const sc=document.getElementById('plistScrim');if(sc)sc.classList.remove('show')}
+function renderPlist(){const box=document.getElementById('plistRows');if(!box)return;
+ box.innerHTML=plist.map((c,i)=>{
+  const safeId=(c.id||'').replace(/'/g,'');
+  const logo=c.logo?'<img src="'+esc(c.logo)+'" loading="lazy" onerror="this.remove()"/>':'<span class="pfb">📺</span>';
+  return '<button role="option" aria-selected="'+(i===plistSel)+'" class="prow'+(i===plistSel?' sel':'')+'" id="prow-'+i+'" onclick="plistTap('+i+')"><span class="pdot" style="background:'+hcol(c.health)+'"></span>'+logo+'<span class="ptx"><b>'+esc(c.name)+'</b><span>'+esc(c.category||'')+'</span></span></button>'}).join('')||'<div class="lEmpty">Nothing in this list.</div>'}
+function plistMark(){for(let i=0;i<plist.length;i++){const el=document.getElementById('prow-'+i);if(!el)continue;
+ el.classList.toggle('sel',i===plistSel);el.setAttribute('aria-selected',i===plistSel?'true':'false')}
+ const el=document.getElementById('prow-'+plistSel);if(el)el.scrollIntoView({block:'nearest'})}
+function plistMove(d){if(!plist.length)return;plistSel=(plistSel+d+plist.length)%plist.length;plistMark()}
+function plistTap(i){plistSel=i;plistMark();plistOk()}
+function plistOk(){if(!plist.length)return;const c=plist[plistSel];if(!c)return;
+ const safeId=(c.id||'').replace(/'/g,'');closePlayerList();play(safeId)}
 function hcol(h){return h==='fast'?'#3DDC84':h==='slow'?'#FFB338':h==='dead'?'#FF5A5A':'#4A4A54'}
 function favStar(c,safeId){return '<span role="button" aria-label="Toggle favourite" onclick="event.stopPropagation();toggleFav(\''+safeId+'\')" style="position:absolute;top:6px;right:6px;width:34px;height:34px;display:flex;align-items:center;justify-content:center;border-radius:50%;background:rgba(0,0,0,.5);border:1px solid '+(c.fav?'rgba(255,179,56,.5)':'rgba(255,255,255,.12)')+';color:'+(c.fav?'#FFB338':'#6E6A80')+';font-size:15px;line-height:1;z-index:2">★</span>'}
 async function toggleFav(id){try{await fetch('/api/favourites',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})})}catch(e){}
@@ -1182,7 +1278,9 @@ async function loadSettings(){try{const r=await fetch('/api/settings');const j=a
  const v=j.prebufferSecs??5;document.getElementById('bufRange').value=v;bufPreview(v);
  const rr=j.repeatRate??6;document.getElementById('repRange').value=rr;repPreview(rr);
  const aq=document.getElementById('autoQr');if(aq)aq.checked=j.autoQr!==false;
- const sp=document.getElementById('showPresets');if(sp)sp.checked=j.showPresets!==false}catch(e){}}
+ const sp=document.getElementById('showPresets');if(sp)sp.checked=j.showPresets!==false;
+ const sv=document.getElementById('stretchVideo');if(sv)sv.checked=j.stretchVideo===true}catch(e){}}
+async function saveStretchOnly(on){try{await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({stretchVideo:on})})}catch(e){}}
 async function saveQrOnly(on){try{await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({autoQr:on})})}catch(e){}}
 async function savePresetsOnly(on){try{await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({showPresets:on})})}catch(e){}}
 async function saveBuffer(){const v=parseInt(document.getElementById('bufRange').value||'5');
