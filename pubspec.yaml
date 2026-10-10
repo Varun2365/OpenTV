@@ -35,6 +35,11 @@ dependencies:
   media_kit: ^1.2.3
   media_kit_video: ^1.2.4
   media_kit_libs_video: ^1.0.5
+  # Pi native backend: flutter-pi has NO media_kit texture support — its
+  # official video path is video_player + gstreamer (HW decode, inline
+  # texture). Desktop keeps media_kit; Pi uses this. See PlayerService.
+  video_player: ^2.10.0
+  flutterpi_gstreamer_video_player: ^0.2.0
   # Network / storage / catalog
   http: ^1.2.2
   shared_preferences: ^2.3.2

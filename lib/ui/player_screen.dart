@@ -10,6 +10,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:heroicons/heroicons.dart';
 import 'package:media_kit_video/media_kit_video.dart';
+import 'package:video_player/video_player.dart';
 
 import '../models/tv_channel.dart';
 import '../services/app_state.dart';
@@ -45,6 +46,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
   void initState() {
     super.initState();
     widget.state.addListener(_onState);
+    // Pi backend swaps its VideoPlayerController per channel — rebuild the
+    // video surface when PlayerService notifies (desktop mpv controller is
+    // stable, so this is a no-op there).
+    widget.player.addListener(_onPlayerBackend);
     // Rebuild once a second so "still connecting…" appears after 6s.
     _tick = Timer.periodic(
         const Duration(seconds: 1), (_) => mounted ? setState(() {}) : null);
@@ -86,7 +91,13 @@ class _PlayerScreenState extends State<PlayerScreen> {
     _keySub?.cancel();
     _plistCtrl.dispose();
     widget.state.removeListener(_onState);
+    widget.player.removeListener(_onPlayerBackend);
     super.dispose();
+  }
+
+  void _onPlayerBackend() {
+    if (!mounted) return;
+    setState(() {});
   }
 
   void _onState() {
@@ -169,14 +180,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
         child: Stack(
           fit: StackFit.expand,
           children: [
-            Video(
-                controller: widget.player.videoController,
-                // Remote "stretch" toggle: fill the screen or keep the
-                // original shape. Rebuilds live via the state listener.
-                fit: s.stretchVideo
-                    ? BoxFit.fill
-                    : BoxFit.contain,
-                controls: NoVideoControls),
+            _videoSurface(s),
             // Rebuffer pill (video visible underneath).
             Positioned(
               top: 26,
@@ -854,6 +858,45 @@ class _PlayerScreenState extends State<PlayerScreen> {
         ),
       ),
     );
+  }
+
+  /// Video surface per backend. Desktop renders mpv via media_kit's Texture;
+  /// flutter-pi has no media_kit native side (linux/runner is never built
+  /// there), so the Pi renders gstreamer via video_player's Texture that
+  /// flutter-pi DOES implement. Same fit semantics on both (remote
+  /// "stretch" toggle: fill vs contain).
+  Widget _videoSurface(AppState s) {
+    final p = widget.player;
+    if (p.isPiMode) {
+      final c = p.piController;
+      if (c != null) {
+        try {
+          if (c.value.isInitialized) {
+            final w = c.value.size.width;
+            final h = c.value.size.height;
+            return SizedBox.expand(
+              child: FittedBox(
+                fit: s.stretchVideo ? BoxFit.fill : BoxFit.contain,
+                child: SizedBox(
+                  width: w > 0 ? w : 1280,
+                  height: h > 0 ? h : 720,
+                  child: VideoPlayer(c),
+                ),
+              ),
+            );
+          }
+        } catch (_) {}
+      }
+      return Container(color: Colors.black);
+    }
+    final mpv = p.videoController;
+    if (mpv == null) return Container(color: Colors.black);
+    return Video(
+        controller: mpv,
+        // Remote "stretch" toggle: fill the screen or keep the
+        // original shape. Rebuilds live via the state listener.
+        fit: s.stretchVideo ? BoxFit.fill : BoxFit.contain,
+        controls: NoVideoControls);
   }
 
   /// Right-side channel list for the current rail. Semi-transparent so

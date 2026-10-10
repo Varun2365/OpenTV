@@ -4,12 +4,14 @@
 // Performance: release + mpv hw decode + capped rails + transform-only anims.
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutterpi_gstreamer_video_player/flutterpi_gstreamer_video_player.dart';
 
 import 'models/tv_channel.dart';
 import 'services/app_state.dart';
 import 'services/catalog_service.dart';
 import 'services/custom_playlist_store.dart';
 import 'services/local_remote_server.dart';
+import 'services/pi_detector.dart';
 import 'services/player_service.dart';
 import 'services/stream_health.dart';
 import 'ui/player_screen.dart';
@@ -17,6 +19,17 @@ import 'ui/tv_home.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  // On flutter-pi the video texture comes from flutter-pi's own gstreamer
+  // plugin (media_kit has no native side there — see PlayerService). Must
+  // register before any VideoPlayerController is created. No-op guarded:
+  // desktop never calls this, so Windows/Linux-dev builds are unaffected.
+  if (isFlutterPi) {
+    try {
+      FlutterpiVideoPlayer.registerWith();
+    } catch (e) {
+      debugPrint('flutter-pi video plugin register failed: $e');
+    }
+  }
   // Bound image memory: LRU of ~120 posters / 32MB so hundred-channel
   // rails can never grow the raster cache without limit on the Pi.
   PaintingBinding.instance.imageCache.maximumSize = 120;
