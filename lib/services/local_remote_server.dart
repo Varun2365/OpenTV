@@ -7,6 +7,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'app_state.dart';
@@ -152,6 +153,7 @@ class LocalRemoteServer {
       'volume': s.volume,
       'muted': s.muted,
       'infoVisible': s.infoVisible,
+      'zone': s.zone.name,
       'focus': s.focusedChannel == null
           ? null
           : _chJson(s, s.focusedChannel!),
@@ -232,6 +234,29 @@ class LocalRemoteServer {
           (path == '/' || path == '/remote' || path == '/index.html')) {
         res.headers.contentType = ContentType.html;
         res.write(_remoteHtml());
+      } else if (req.method == 'GET' && path.startsWith('/img/')) {
+        // Bundled artwork for the remote page (logo). Strict filename
+        // whitelist — never serve arbitrary paths.
+        final name = path.substring('/img/'.length);
+        if (!RegExp(r'^[A-Za-z0-9_-]+\.png$').hasMatch(name)) {
+          res.statusCode = 400;
+          res.headers.contentType = ContentType.json;
+          res.write(
+              jsonEncode({'ok': false, 'error': 'bad image'}));
+        } else {
+          try {
+            final data =
+                await rootBundle.load('assets/images/$name');
+            res.headers.contentType =
+                ContentType('image', 'png');
+            res.headers.set(
+                'Cache-Control', 'public, max-age=86400');
+            res.add(data.buffer.asUint8List());
+          } catch (_) {
+            res.statusCode = 404;
+            res.write('not found');
+          }
+        }
       } else if (req.method == 'GET' && path == '/health') {
         res.headers.contentType = ContentType.json;
         res.write(jsonEncode({
@@ -254,6 +279,7 @@ class LocalRemoteServer {
           'volume': s.volume,
           'muted': s.muted,
           'infoVisible': s.infoVisible,
+          'zone': s.zone.name,
           'focus': s.focusedChannel == null
               ? null
               : _chJson(s, s.focusedChannel!),
@@ -367,12 +393,11 @@ class LocalRemoteServer {
                 : '${m['name']}'.trim().substring(
                     0, '${m['name']}'.trim().length.clamp(0, 40));
         final url = '${m['url'] ?? ''}'.trim();
-        // Remote-picked icon (validated key) + opaque ARGB color.
+        // Remote-picked icon (Heroicons key) + opaque ARGB color.
         final iconRaw =
-            '${m['icon'] ?? CustomPlaylist.defaultIcon}'
-                .toLowerCase();
+            '${m['icon'] ?? CustomPlaylist.defaultIcon}';
         final icon =
-            RegExp(r'^[a-z_]{1,24}$').hasMatch(iconRaw)
+            RegExp(r'^[A-Za-z]{1,32}$').hasMatch(iconRaw)
                 ? iconRaw
                 : CustomPlaylist.defaultIcon;
         var color =
@@ -472,6 +497,7 @@ class LocalRemoteServer {
           'prebufferSecs': s.prebufferSecs,
           'repeatRate': s.repeatRate,
           'autoQr': s.autoQr,
+          'showPresets': s.showPresets,
         }));
       } else if (req.method == 'POST' && path == '/api/settings') {
         final body = await utf8.decoder.bind(req).join();
@@ -491,6 +517,12 @@ class LocalRemoteServer {
               aq == true || '$aq' == '1' || '$aq' == 'true';
           // Key absent (older clients) keeps the current value.
           if (m.containsKey('autoQr')) s.setAutoQr(autoQr);
+          final sp = m['showPresets'];
+          final showPresets =
+              sp == true || '$sp' == '1' || '$sp' == 'true';
+          if (m.containsKey('showPresets')) {
+            s.setShowPresets(showPresets);
+          }
           try {
             final prefs =
                 await SharedPreferences.getInstance();
@@ -499,6 +531,10 @@ class LocalRemoteServer {
             if (m.containsKey('autoQr')) {
               await prefs.setBool('opentv_auto_qr', s.autoQr);
             }
+            if (m.containsKey('showPresets')) {
+              await prefs.setBool(
+                  'opentv_show_presets', s.showPresets);
+            }
           } catch (_) {}
           res.headers.contentType = ContentType.json;
           res.write(jsonEncode({
@@ -506,6 +542,7 @@ class LocalRemoteServer {
             'prebufferSecs': v,
             'repeatRate': r,
             'autoQr': s.autoQr,
+            'showPresets': s.showPresets,
           }));
         } catch (e) {
           res.statusCode = 400;
@@ -607,6 +644,7 @@ class LocalRemoteServer {
 <!doctype html><html lang="en"><head><meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
 <meta name="theme-color" content="#0B0B0F"/>
+<link rel="icon" type="image/png" href="/img/logo.png"/>
 <title>OpenTV • Remote</title>
 <style>
 :root{--bg:#0B0B0F;--card:#14141B;--card2:#1E1E28;--deep:#0E0E13;--line:rgba(255,255,255,.09);
@@ -641,14 +679,12 @@ align-items:center;justify-content:center;gap:5px;background:var(--card);flex:0 
 #burger span{display:block;width:18px;height:2px;border-radius:2px;background:var(--paper)}
 #burger span:nth-child(2){width:13px;margin-right:5px;background:var(--gold)}
 .brand{display:flex;align-items:center;gap:10px;min-width:0}
-.logo{width:34px;height:34px;border-radius:10px;background:var(--gold);color:var(--gold-ink);
-font-weight:800;display:flex;align-items:center;justify-content:center;font-size:13.5px;flex:0 0 auto}
+.logo{width:38px;height:38px;border-radius:10px;flex:0 0 auto;object-fit:contain}
 .brand h1{font-size:15.5px;margin:0;line-height:1.1;white-space:nowrap}
 .brand h1 small{display:block;font-size:11px;color:var(--muted);font-weight:500;letter-spacing:.02em}
-.conn{margin-left:auto;display:flex;align-items:center;background:var(--card);
-border:1px solid var(--line);border-radius:50%;padding:10px}
-.conn i{width:10px;height:10px;border-radius:50%;background:var(--red);display:inline-block;flex:0 0 auto}
-.conn.on i{background:var(--green);box-shadow:0 0 8px var(--green)}
+.conn{margin-left:auto;margin-right:3px;width:11px;height:11px;border-radius:50%;
+background:#FF5A5A;flex:0 0 auto;transition:background .25s ease,box-shadow .25s ease}
+.conn.on{background:var(--green);box-shadow:0 0 10px rgba(61,220,132,.8)}
 /* drawer */
 #scrim{position:fixed;inset:0;background:rgba(0,0,0,.58);backdrop-filter:blur(2px);
 opacity:0;pointer-events:none;transition:opacity .25s ease;z-index:30}
@@ -721,6 +757,7 @@ letter-spacing:.06em;box-shadow:0 0 0 7px var(--gold-soft),0 0 28px rgba(255,179
 .chHead{width:100%;max-width:100%;box-sizing:border-box;margin:0;background:#101016;border-top:1px solid var(--line);
 border-bottom:1px solid var(--line);position:sticky;top:var(--topH);z-index:6}
 .chips{display:flex;gap:8px;overflow-x:auto;overflow-y:hidden;padding:10px 14px;scrollbar-width:none;
+-webkit-overflow-scrolling:touch;overscroll-behavior-x:contain;touch-action:pan-x pan-y;
 max-height:68px;transition:max-height .3s cubic-bezier(.32,.72,.24,1),opacity .22s ease,padding .3s ease}
 #pg-ch.noChips .chips{max-height:0;opacity:0;padding-top:0;padding-bottom:0}
 .chHead .searchBox{padding:0 14px 12px}
@@ -792,6 +829,7 @@ padding:0 14px;border-radius:14px;font-size:13px;font-weight:800;background:#232
 .dlgActs .add{background:var(--gold);color:var(--gold-ink);border:0;font-weight:800}
 .dlgActs .danger{background:rgba(255,90,90,.1);border:1px solid rgba(255,90,90,.45);
 color:#FF7A7A;font-weight:800}
+.dlgActs .danger:disabled{opacity:.35}
 .cfmSub{margin:0 0 2px;font-size:13.5px;color:var(--muted);line-height:1.55}
 .cfmSub b{color:var(--paper)}
 .fld{display:block;margin:0 0 12px}
@@ -815,6 +853,18 @@ display:flex;align-items:center;justify-content:center}
 .pl input[type=range]{accent-color:var(--gold);height:42px;padding:0;border:0;background:transparent;min-height:0;margin:6px 0 2px}
 .setval{font-size:30px;font-weight:800;font-variant-numeric:tabular-nums;letter-spacing:-.02em;margin:6px 0 2px}
 .setval small{font-size:14px;color:var(--muted);font-weight:600}
+.icRow{display:flex;align-items:center;gap:10px;margin:2px 0 8px}
+.icLbl{font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);font-weight:800}
+.icPick{width:52px;height:52px;min-height:0;border-radius:14px;background:var(--deep);border:1px solid var(--line);font-size:24px;display:flex;align-items:center;justify-content:center;margin:0}
+.icName{font-size:13px;color:var(--paper);font-weight:700}
+.swRow{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 4px}
+.sw{width:34px;height:34px;min-height:0;min-width:0;padding:0;margin:0;border-radius:50%;border:2px solid transparent}
+.sw.on{border-color:#fff}
+.icGrid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;max-height:320px;overflow-y:auto;margin-top:10px}
+.icBtn{display:flex;flex-direction:column;align-items:center;gap:4px;padding:10px 4px;border-radius:14px;background:var(--deep);border:1px solid var(--line);font-size:22px;min-height:0;margin:0;color:var(--paper)}
+.icBtn small{font-size:10px;color:var(--muted);font-weight:600}
+.icBtn.on{border-color:var(--gold);background:var(--gold-soft)}
+.ldot{width:34px;height:34px;border-radius:11px;display:flex;align-items:center;justify-content:center;font-size:17px;flex:0 0 auto}
 .tile{position:relative}
 .fstar{position:absolute;top:6px;right:6px;width:34px;height:34px;min-height:0;min-width:0;padding:0;margin:0;border-radius:50%;background:rgba(0,0,0,.5);border:1px solid var(--line);color:#6E6A80;font-size:15px;line-height:1;display:flex;align-items:center;justify-content:center;z-index:2}
 .fstar.on{color:var(--gold);border-color:rgba(255,179,56,.45)}
@@ -829,7 +879,7 @@ display:flex;align-items:center;justify-content:center}
 </style></head><body>
 <div id="scrim" onclick="closeDrawer()"></div>
 <aside id="drawer" aria-label="Menu">
-<div class="drHead"><div class="logo">OTV</div>
+<div class="drHead"><img class="logo" src="/img/logo.png" alt="OpenTV"/>
 <div class="t">OpenTV<small>Phone remote</small></div>
 <button id="closeBtn" onclick="closeDrawer()" aria-label="Close menu">✕</button></div>
 <nav class="drNav">
@@ -842,8 +892,8 @@ display:flex;align-items:center;justify-content:center}
 </aside>
 <header id="topbar">
 <button id="burger" onclick="toggleDrawer()" aria-label="Open menu" aria-expanded="false"><span></span><span></span><span></span></button>
-<div class="brand"><div class="logo">OTV</div><h1>OpenTV<small id="brandSub">Remote</small></h1></div>
-<div class="conn" id="conn"><i></i><span id="connT">link…</span></div>
+<div class="brand"><img class="logo" src="/img/logo.png" alt="OpenTV"/><h1>OpenTV<small id="brandSub">Remote</small></h1></div>
+<div class="conn" id="conn" role="status" aria-label="Connection"></div>
 </header>
 <main id="pages">
 <section class="page on" id="pg-remote"><div class="padX">
@@ -854,11 +904,14 @@ display:flex;align-items:center;justify-content:center}
 <button class="ghost" onclick="key('back')">← Back</button>
 <button class="ghost" onclick="key('home')">⌂ Home</button>
 <button class="ghost" id="infoBtn" onclick="info()">ⓘ Info</button>
-</div><p class="eyebrow">Direction</p>
+</div>
+<div style="display:flex;gap:8px;margin-bottom:10px"><button class="ghost" id="favBtn" onclick="toggleFavPlaying()" style="flex:1">☆ Favourite</button></div>
+<div style="display:flex;align-items:center;gap:10px;margin-bottom:4px"><span style="font-size:12px;color:var(--muted)">Quality</span><select id="qSel" onchange="setQuality(this.value)" style="flex:1;min-width:0;padding:12px;border-radius:12px;border:1px solid var(--line);background:#0E0E13;color:var(--paper);font-size:14px;font-family:inherit"><option value="auto">Auto</option></select></div>
+<p class="eyebrow">Direction</p>
 <div class="dpad">
-<span></span><button onclick="key('up')" aria-label="Up">▲</button><span></span>
+<span></span><button onpointerdown="hold('up',event,true)" onpointerup="unhold()" onpointerleave="unhold()" onpointercancel="unhold()" oncontextmenu="return false" aria-label="Up">▲</button><span></span>
 <button onpointerdown="hold('left',event)" onpointerup="unhold()" onpointerleave="unhold()" onpointercancel="unhold()" oncontextmenu="return false" aria-label="Left">◀</button><button class="ok" onclick="key('ok')">OK</button><button onpointerdown="hold('right',event)" onpointerup="unhold()" onpointerleave="unhold()" onpointercancel="unhold()" oncontextmenu="return false" aria-label="Right">▶</button>
-<span></span><button onclick="key('down')" aria-label="Down">▼</button><span></span>
+<span></span><button onpointerdown="hold('down',event,true)" onpointerup="unhold()" onpointerleave="unhold()" onpointercancel="unhold()" oncontextmenu="return false" aria-label="Down">▼</button><span></span>
 </div>
 <div class="ctl"><p class="eyebrow">Channel</p>
 <div class="seg" style="margin-top:8px"><button onclick="key('channelUp')">CH ＋</button><button onclick="key('channelDown')">CH －</button></div></div>
@@ -873,6 +926,7 @@ display:flex;align-items:center;justify-content:center}
 <div class="searchBox"><input id="q" placeholder="Search in this list…" oninput="search(this.value)" autocomplete="off"/></div>
 </div>
 <div class="chTools"><div class="count" id="chCount"></div></div>
+<div id="favWrap"></div>
 <div class="grid" id="grid"></div>
 <div class="empty" id="chEmpty" style="display:none"><div class="big">📺</div>
 <h3>No lists yet</h3><p>Paste an M3U link under Lists and it appears here as its own tab.</p>
@@ -891,8 +945,18 @@ display:flex;align-items:center;justify-content:center}
 <h3 class="dlgTitle">Add to TV</h3>
 <label class="fld"><span>Name</span><input id="plName" placeholder="e.g. Sports, Tamil, Kids" maxlength="40" autocomplete="off"/></label>
 <label class="fld"><span>M3U link</span><span class="urlWrap"><input id="plUrl" placeholder="https://…/playlist.m3u" inputmode="url" autocomplete="off"/><button class="pasteBtn" onclick="pasteUrl()" aria-label="Paste link from clipboard">⧉ Paste</button></span></label>
+<div class="icRow"><span class="icLbl">Icon</span><button class="icPick" id="icPick" onclick="openIcons()">📺</button><span class="icName" id="icName">TV</span></div>
+<div class="swRow" id="swRow"></div>
 <div class="plmsg" id="plMsg"></div>
 <div class="dlgActs"><button class="ghost" onclick="closeAdd()">Cancel</button><button class="add" id="plBtn" onclick="addPlaylist()">Save</button></div>
+</div>
+</div>
+<div class="ovl" id="iconOvl" onclick="if(event.target===this)closeIcons()">
+<div class="dlg" role="dialog" aria-modal="true" aria-label="Pick an icon">
+<p class="eyebrow">Icon</p>
+<h3 class="dlgTitle">Pick a sidebar icon</h3>
+<div class="icGrid" id="icGrid"></div>
+<div class="dlgActs"><button class="ghost" onclick="closeIcons()">Done</button></div>
 </div>
 </div>
 <div class="ovl" id="cfmOvl" onclick="if(event.target===this)closeCfm()">
@@ -915,11 +979,24 @@ display:flex;align-items:center;justify-content:center}
 <p class="sub">Hold ◀ ▶ to glide across channels — keys per second.</p>
 <input id="repRange" type="range" min="2" max="12" step="1" value="6" oninput="repPreview(this.value)"/>
 <label style="display:flex;align-items:center;gap:10px;margin:14px 0 2px;font-size:13px;color:var(--paper)"><input id="autoQr" type="checkbox" checked onchange="saveQrOnly(this.checked)" style="width:22px;height:22px;accent-color:var(--gold);flex:0 0 auto"/><span>Pop up the TV QR code when no phone is linked</span></label>
+<label style="display:flex;align-items:center;gap:10px;margin:10px 0 2px;font-size:13px;color:var(--paper)"><input id="showPresets" type="checkbox" checked onchange="savePresetsOnly(this.checked)" style="width:22px;height:22px;accent-color:var(--gold);flex:0 0 auto"/><span>Show built-in categories in the TV sidebar</span></label>
 <div class="hint">5–10s is the sweet spot on Pi 4. Bigger tank = longer start wait + more RAM.</div></div>
+<div class="pl" style="margin-top:12px;border-color:rgba(255,90,90,.35)"><p class="eyebrow" style="color:var(--red)">Danger zone</p><h3 style="margin:8px 0 4px">Clear everything</h3>
+<p class="sub">Wipes all lists, favourites and caches on the TV. Cannot be undone.</p>
+<button id="wipeOpenBtn" onclick="openWipe()" style="width:100%;padding:13px;border-radius:13px;border:1px solid rgba(255,90,90,.45);background:rgba(255,90,90,.08);color:#FF7A7A;font-weight:800;font-size:14px">Clear all data…</button></div>
 </div></section>
+<div class="ovl" id="wipeOvl" onclick="if(event.target===this)closeWipe()">
+<div class="dlg" role="alertdialog" aria-modal="true" aria-label="Clear everything">
+<p class="eyebrow" style="color:var(--red)">Danger zone</p>
+<h3 class="dlgTitle">Clear everything?</h3>
+<p class="cfmSub">Wipes <b>all lists, favourites and caches</b>. Type <b>CLEAR LIST</b> below to unlock the wipe.</p>
+<label class="fld"><span>Type to confirm</span><input id="wipeInput" placeholder="CLEAR LIST" autocomplete="off" autocapitalize="characters" oninput="wipeCheck()"/></label>
+<div class="dlgActs"><button class="ghost" onclick="closeWipe()">Keep</button><button class="danger" id="wipeYes" onclick="doWipe()" disabled>Wipe all</button></div>
+</div>
+</div>
 </main>
 <script>
-let ws=null,deb=null,cats=[],curCat=0;
+let ws=null,deb=null,cats=[],curCat=0,catsSig='';
 function esc(s){return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
 function setConn(on,t){document.getElementById('conn').classList.toggle('on',!!on);
 document.getElementById('drConn').textContent=t||(on?'Live':'Offline')}
@@ -930,11 +1007,12 @@ function closeDrawer(){document.getElementById('drawer').classList.remove('open'
 document.getElementById('scrim').classList.remove('show');
 document.getElementById('burger').setAttribute('aria-expanded','false')}
 function toggleDrawer(){document.getElementById('drawer').classList.contains('open')?closeDrawer():openDrawer()}
-document.addEventListener('keydown',e=>{if(e.key==='Escape'){closeAdd();closeCfm();closeDrawer()}});
+document.addEventListener('keydown',e=>{if(e.key==='Escape'){closeAdd();closeCfm();closeIcons();closeWipe();closeDrawer()}});
 document.getElementById('pg-remote').addEventListener('contextmenu',e=>e.preventDefault());
-let holdTimer=null,holdInt=null,holdKey=null,repeatRate=6;
-function hold(k,e){if(e&&e.preventDefault)e.preventDefault();key(k);holdKey=k;
+let holdTimer=null,holdInt=null,holdKey=null,repeatRate=6,tvZone='grid';
+function hold(k,e,vert){if(e&&e.preventDefault)e.preventDefault();key(k);holdKey=k;
  clearTimeout(holdTimer);clearInterval(holdInt);
+ if(vert&&tvZone!=='grid')return; // vertical glide only inside the channel grid
  holdTimer=setTimeout(()=>{holdInt=setInterval(()=>{if(holdKey)key(holdKey)},1000/Math.max(2,repeatRate))},350)}
 function unhold(){holdKey=null;clearTimeout(holdTimer);clearInterval(holdInt)}
 function repPreview(v){const el=document.getElementById('repVal');if(el)el.innerHTML=v+'/s';repeatRate=parseInt(v)||6}
@@ -942,14 +1020,25 @@ function key(k){
  if(ws&&ws.readyState===1){ws.send(JSON.stringify({type:'key',key:k}));return}
  fetch('/api/key',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:k})}).then(pull)}
 function play(id){
+ setTimeout(loadQualities,4000);
  if(ws&&ws.readyState===1){ws.send(JSON.stringify({type:'play',id}));return}
  fetch('/api/play',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})}).then(pull)}
+let curPlayingId=null,curPlayingFav=false;
+async function toggleFavPlaying(){if(!curPlayingId)return;try{const r=await fetch('/api/favourites',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:curPlayingId})});const j=await r.json();if(j.ok){curPlayingFav=!!j.fav;paintFavBtn()}}catch(e){}}
+function paintFavBtn(){const b=document.getElementById('favBtn');if(!b)return;b.textContent=(curPlayingFav?'★ ':'☆ ')+'Favourite'}
+async function loadQualities(){try{const r=await fetch('/api/tracks');const j=await r.json();
+ const sel=document.getElementById('qSel');if(!sel)return;
+ sel.innerHTML='<option value="auto">Auto</option>'+(j.video||[]).filter(t=>t.id!=='auto'&&t.id!=='no').map(t=>'<option value="'+t.id+'">'+esc(t.title||t.id)+'</option>').join('');
+ sel.value=j.selected||'auto'}catch(e){}}
+async function setQuality(id){try{await fetch('/api/tracks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({video:id})})}catch(e){}setTimeout(loadQualities,1500)}
 function info(){
  if(ws&&ws.readyState===1){ws.send(JSON.stringify({type:'info'}));return}
  fetch('/api/info',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({toggle:true})}).then(pull)}
 async function pull(){try{const r=await fetch('/api/now');const j=await r.json();paint(j)}catch(e){}}
 function paint(j){
  const p=j.playing||j.focus||null;
+ tvZone=j.zone||'grid';
+ curPlayingId=p?p.id:null;curPlayingFav=!!(p&&p.fav);paintFavBtn();
  document.getElementById('np').textContent=p?p.name:'—';
  document.getElementById('brandSub').textContent=p?p.name:'Remote';
  let sub=p?((p.category||'')+(p.language?' • '+p.language:'')):'Pick a channel from Channels';
@@ -960,7 +1049,7 @@ function paint(j){
  document.getElementById('infoBtn').classList.toggle('on',!!j.infoVisible);
  setConn(true,'live')}
 function hcol(h){return h==='fast'?'#3DDC84':h==='slow'?'#FFB338':h==='dead'?'#FF5A5A':'#4A4A54'}
-function favStar(c,safeId){return '<button onclick="event.stopPropagation();toggleFav(\''+safeId+'\')" aria-label="Toggle favourite" style="position:absolute;top:6px;right:6px;width:34px;height:34px;padding:0;margin:0;border-radius:50%;background:rgba(0,0,0,.5);border:1px solid '+(c.fav?'rgba(255,179,56,.5)':'rgba(255,255,255,.12)')+';color:'+(c.fav?'#FFB338':'#6E6A80')+';font-size:15px;line-height:1;z-index:2">★</button>'}
+function favStar(c,safeId){return '<span role="button" aria-label="Toggle favourite" onclick="event.stopPropagation();toggleFav(\''+safeId+'\')" style="position:absolute;top:6px;right:6px;width:34px;height:34px;display:flex;align-items:center;justify-content:center;border-radius:50%;background:rgba(0,0,0,.5);border:1px solid '+(c.fav?'rgba(255,179,56,.5)':'rgba(255,255,255,.12)')+';color:'+(c.fav?'#FFB338':'#6E6A80')+';font-size:15px;line-height:1;z-index:2">★</span>'}
 async function toggleFav(id){try{await fetch('/api/favourites',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})})}catch(e){}
  if(favMode)loadFavs();else loadCatChannels(document.getElementById('q').value||'')}
 let favMode=false,favCache=[];
@@ -971,32 +1060,39 @@ function selectFav(){favMode=true;for(let k=0;k<cats.length;k++){const b=documen
  document.getElementById('q').value='';loadFavs()}
 function render(arr){
  const favs=arr.filter(c=>c.fav);
- const strip=favs.length?'<p style="font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);font-weight:800;margin:0;padding:12px 14px 0">Favourites</p><div style="display:flex;gap:8px;overflow-x:auto;padding:6px 14px 12px">'+favs.map(c=>{
+ document.getElementById('favWrap').innerHTML=favs.length?'<p style="font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);font-weight:800;margin:0;padding:12px 14px 0">Favourites</p><div style="display:flex;gap:8px;overflow-x:auto;padding:6px 14px 12px">'+favs.map(c=>{
   const safeId=(c.id||'').replace(/'/g,'');
   const logo=c.logo?'<img src="'+esc(c.logo)+'" loading="lazy" onerror="this.remove()" style="width:30px;height:30px;border-radius:50%;object-fit:cover;background:#0E0E13"/>':'';
   return '<button onclick="play(\''+safeId+'\')" style="flex:0 0 auto;display:flex;align-items:center;gap:8px;padding:8px;border-radius:999px;background:var(--card);border:1px solid var(--line);color:var(--paper);font:inherit;font-size:12.5px;font-weight:700;max-width:220px">'+logo+'<span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+esc(c.name)+'</span><span onclick="event.stopPropagation();toggleFav(\''+safeId+'\')" style="color:var(--gold);font-size:14px;padding:4px 6px">★</span></button>'}).join('')+'</div>':'';
  const g=document.getElementById('grid');
- g.innerHTML=strip+'<p style="font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);font-weight:800;margin:0;padding:12px 14px 0">All channels</p>'+arr.map(c=>{
+ g.innerHTML=(favs.length?'<p style="font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);font-weight:800;margin:0;padding:12px 14px 0;grid-column:1/-1">All channels</p>':'')+arr.map(c=>{
   const safeId=(c.id||'').replace(/'/g,'');
   const logo=c.logo?'<img src="'+esc(c.logo)+'" loading="lazy" onerror="this.remove()"/>':'<span class="fb">📺</span>';
   return '<button class="tile" onclick="play(\''+safeId+'\')">'+favStar(c,safeId)+'<span class="dotrow"><i style="width:8px;height:8px;border-radius:50%;background:'+hcol(c.health)+'"></i><span class="play">PLAY</span></span>'+logo+'<span class="t">'+esc(c.name)+'</span><span class="c">'+esc(c.category||'')+'</span></button>'}).join('');
  const empty=document.getElementById('chEmpty');
  const hasCats=cats&&cats.length>0;
  empty.style.display=(!hasCats||arr.length===0&&!document.getElementById('q').value)?'block':'none';
- if(!hasCats){g.innerHTML='';empty.style.display='block'}
+ if(!hasCats){g.innerHTML='';document.getElementById('favWrap').innerHTML='';empty.style.display='block'}
  else if(arr.length===0){empty.style.display='block';empty.querySelector('h3').textContent='Nothing found';empty.querySelector('p').textContent='Try another search or list.';empty.querySelector('.go').style.display='none'}
  else{empty.querySelector('h3').textContent='No lists yet';empty.querySelector('p').textContent='Paste an M3U link under Lists and it appears here as its own tab.';empty.querySelector('.go').style.display='';empty.style.display='none'}}
 function tab(t){for(const x of['remote','ch','lists','settings']){document.getElementById('pg-'+x).classList.toggle('on',x===t);document.getElementById('nv-'+x).classList.toggle('on',x===t)}
 closeAdd();closeCfm();closeDrawer();window.scrollTo({top:0});lastY=window.scrollY||0;
 document.getElementById('pg-ch').classList.remove('noChips');
-if(t==='ch')loadCats();if(t==='lists')loadPlaylists();if(t==='settings')loadSettings()}
-async function loadCats(){try{const r=await fetch('/api/categories');cats=await r.json();
+if(t==='ch')loadCats(true);if(t==='lists')loadPlaylists();if(t==='settings')loadSettings();if(t==='remote')loadQualities()}
+async function loadCats(force){try{const r=await fetch('/api/categories');const fresh=await r.json();
+ const sig=JSON.stringify(fresh.map(c=>[c.title,c.count]));
  const box=document.getElementById('chips');
+ if(sig===catsSig){if(force&&!favMode){if(curCat>=cats.length)curCat=0;selectCat(curCat)}return}
+ const sx=box?box.scrollLeft:0;
+ cats=fresh;catsSig=sig;
  if(!cats.length){box.innerHTML='';document.getElementById('chCount').textContent='0 lists';
-  document.getElementById('grid').innerHTML='';document.getElementById('chEmpty').style.display='block';return}
+  document.getElementById('grid').innerHTML='';document.getElementById('favWrap').innerHTML='';document.getElementById('chEmpty').style.display='block';return}
  document.getElementById('chEmpty').style.display='none';
  box.innerHTML='<button class="chip" id="chip-fav" onclick="selectFav()">★ Favourites</button>'+cats.map((c,i)=>'<button class="chip" id="chip-'+i+'" onclick="selectCat('+i+')">'+esc(c.title||('List '+(i+1)))+'</button>').join('');
- if(curCat>=cats.length)curCat=0;selectCat(curCat)}catch(e){}}
+ requestAnimationFrame(()=>{try{box.scrollLeft=sx}catch(e){}});
+ if(curCat>=cats.length)curCat=0;
+ if(favMode){const f=document.getElementById('chip-fav');if(f)f.classList.add('on');loadFavs()}
+ else selectCat(curCat)}catch(e){}}
 function selectCat(i){favMode=false;const fb=document.getElementById('chip-fav');if(fb)fb.classList.remove('on');curCat=i;for(let k=0;k<cats.length;k++){const b=document.getElementById('chip-'+k);if(b)b.classList.toggle('on',k===i)}
  document.getElementById('q').value='';loadCatChannels('')}
 async function loadCatChannels(q){try{const c=cats[curCat];
@@ -1023,8 +1119,10 @@ function bufPreview(v){document.getElementById('bufVal').innerHTML=v+'<small>s</
 async function loadSettings(){try{const r=await fetch('/api/settings');const j=await r.json();
  const v=j.prebufferSecs??5;document.getElementById('bufRange').value=v;bufPreview(v);
  const rr=j.repeatRate??6;document.getElementById('repRange').value=rr;repPreview(rr);
- const aq=document.getElementById('autoQr');if(aq)aq.checked=j.autoQr!==false}catch(e){}}
+ const aq=document.getElementById('autoQr');if(aq)aq.checked=j.autoQr!==false;
+ const sp=document.getElementById('showPresets');if(sp)sp.checked=j.showPresets!==false}catch(e){}}
 async function saveQrOnly(on){try{await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({autoQr:on})})}catch(e){}}
+async function savePresetsOnly(on){try{await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({showPresets:on})})}catch(e){}}
 async function saveBuffer(){const v=parseInt(document.getElementById('bufRange').value||'5');
  const rr=parseInt(document.getElementById('repRange').value||'6');
  const b=document.getElementById('bufBtn');b.disabled=true;
@@ -1038,10 +1136,22 @@ async function loadPlaylists(){try{const r=await fetch('/api/playlists');const a
  document.getElementById('listsCount').textContent=n===0?'No saved playlists yet':n===1?'1 saved playlist • tap to open its channels':n+' saved playlists • tap to open its channels';
  document.getElementById('plList').innerHTML=arr.map(p=>
  '<div class="lrow"><button class="lmain" onclick="viewList(decodeURIComponent(\''+encodeURIComponent(p.name).replace(/'/g,'%27')+'\'))">'
- +'<span class="lstar">★</span><span class="ltx"><b>'+esc(p.name)+'</b><span>'+p.count+' channels</span></span><span class="lgo">›</span></button>'
+ +'<span class="ldot" style="background:'+numCss(p.color)+'">'+(EMOJI[p.icon]||'📺')+'</span><span class="ltx"><b>'+esc(p.name)+'</b><span>'+p.count+' channels</span></span><span class="lgo">›</span></button>'
  +'<button class="lrm" onclick="askDel(\''+p.id+'\',\''+encodeURIComponent(p.name).replace(/'/g,'%27')+'\')" aria-label="Remove '+esc(p.name)+'">'
  +'<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16"/><path d="M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/><path d="M6.5 7l1 12a1 1 0 0 0 1 1h7a1 1 0 0 0 1-1l1-12"/></svg></button></div>').join('')||'<div class="lEmpty">Nothing saved yet.<br/>Tap Add New List to begin.</div>'}catch(e){}}
-function openAdd(){document.getElementById('plMsg').textContent='';document.getElementById('plMsg').className='plmsg';
+const ICONS=[{k:'tv',e:'📺',n:'TV'},{k:'film',e:'🎬',n:'Movies'},{k:'trophy',e:'🏆',n:'Sports'},{k:'musicalNote',e:'🎵',n:'Music'},{k:'newspaper',e:'📰',n:'News'},{k:'faceSmile',e:'😊',n:'Kids'},{k:'globeAlt',e:'🌍',n:'Global'},{k:'flag',e:'🚩',n:'Nation'},{k:'radio',e:'📻',n:'Radio'},{k:'star',e:'⭐',n:'Starred'},{k:'heart',e:'❤️',n:'Loved'},{k:'bolt',e:'⚡',n:'Quick'},{k:'sparkles',e:'✨',n:'Fresh'},{k:'ticket',e:'🎟️',n:'Events'},{k:'play',e:'▶️',n:'Play'},{k:'home',e:'🏠',n:'Home'},{k:'rss',e:'📡',n:'Feeds'},{k:'signal',e:'📶',n:'Signal'},{k:'clock',e:'🕐',n:'Time'},{k:'moon',e:'🌙',n:'Night'},{k:'sun',e:'☀️',n:'Day'},{k:'cloud',e:'☁️',n:'Cloud'},{k:'bookOpen',e:'📖',n:'Stories'},{k:'bookmark',e:'🔖',n:'Saved'},{k:'gift',e:'🎁',n:'Gifts'},{k:'cake',e:'🎂',n:'Fun'},{k:'photo',e:'🖼️',n:'Photos'},{k:'videoCamera',e:'🎥',n:'Videos'},{k:'microphone',e:'🎤',n:'Talk'},{k:'phone',e:'📱',n:'Mobile'},{k:'users',e:'👥',n:'Community'},{k:'user',e:'👤',n:'Personal'},{k:'briefcase',e:'💼',n:'Work'},{k:'academicCap',e:'🎓',n:'Learn'},{k:'map',e:'🗺️',n:'Travel'},{k:'wallet',e:'👛',n:'Money'},{k:'cog6Tooth',e:'⚙️',n:'Settings'}];
+const COLORS=['#3D9BFF','#FFB338','#3DDC84','#FF5A5A','#B388FF','#FF7AB8','#4DD0E1','#FFD54F','#9CCC65','#F5F1E8'];
+const EMOJI={};ICONS.forEach(o=>EMOJI[o.k]=o.e);
+let selIcon='tv',selColor='#3D9BFF';
+function numCss(v){const n=(Number(v)>>>0).toString(16).padStart(8,'0');return '#'+n.slice(2)}
+function renderSwatches(){document.getElementById('swRow').innerHTML=COLORS.map(c=>'<button class="sw'+(c===selColor?' on':'')+'" style="background:'+c+'" onclick="pickColor(\''+c+'\')" aria-label="'+c+'"></button>').join('')}
+function pickColor(c){selColor=c;renderSwatches()}
+function paintIconPick(){const o=ICONS.find(o=>o.k===selIcon)||ICONS[0];document.getElementById('icPick').textContent=o.e;document.getElementById('icPick').style.borderColor=selColor;document.getElementById('icName').textContent=o.n}
+function openIcons(){renderIconGrid();document.getElementById('iconOvl').classList.add('show')}
+function closeIcons(){const o=document.getElementById('iconOvl');if(o)o.classList.remove('show')}
+function renderIconGrid(){document.getElementById('icGrid').innerHTML=ICONS.map(o=>'<button class="icBtn'+(o.k===selIcon?' on':'')+'" onclick="pickIcon(\''+o.k+'\')"><span>'+o.e+'</span><small>'+o.n+'</small></button>').join('')}
+function pickIcon(k){selIcon=k;paintIconPick();renderIconGrid();closeIcons()}
+function openAdd(){selIcon='tv';selColor='#3D9BFF';renderSwatches();paintIconPick();document.getElementById('plMsg').textContent='';document.getElementById('plMsg').className='plmsg';
 document.getElementById('addOvl').classList.add('show');setTimeout(()=>{try{document.getElementById('plName').focus({preventScroll:true})}catch(_){}},80)}
 function closeAdd(){const o=document.getElementById('addOvl');if(o)o.classList.remove('show')}
 async function pasteUrl(){const inp=document.getElementById('plUrl');
@@ -1054,30 +1164,38 @@ function askDel(id,encName){pendDelId=id;
  document.getElementById('cfmName').innerHTML='Remove <b>'+esc(decodeURIComponent(encName||''))+'</b> from the TV?';
  document.getElementById('cfmOvl').classList.add('show')}
 function closeCfm(){pendDelId=null;const o=document.getElementById('cfmOvl');if(o)o.classList.remove('show')}
+function openWipe(){const i=document.getElementById('wipeInput');i.value='';document.getElementById('wipeYes').disabled=true;document.getElementById('wipeOvl').classList.add('show');setTimeout(()=>{try{i.focus({preventScroll:true})}catch(_){}},80)}
+function closeWipe(){const o=document.getElementById('wipeOvl');if(o)o.classList.remove('show')}
+function wipeCheck(){document.getElementById('wipeYes').disabled=document.getElementById('wipeInput').value.trim()!=='CLEAR LIST'}
+async function doWipe(){const b=document.getElementById('wipeYes');if(b.disabled)return;b.disabled=true;
+ try{const r=await fetch('/api/database',{method:'DELETE'});const j=await r.json();
+ if(j.ok){closeWipe();curCat=0;loadPlaylists();if(favMode)loadFavs();else loadCats(true)}}catch(e){}
+ b.disabled=false}
 async function doDel(){if(!pendDelId){closeCfm();return}
  const b=document.getElementById('cfmYes');b.disabled=true;
  await fetch('/api/playlists?id='+encodeURIComponent(pendDelId),{method:'DELETE'});
  b.disabled=false;closeCfm();
  if(curCat>=cats.length-1)curCat=0;
- loadPlaylists();if(favMode)loadFavs();else loadCats()}
+ loadPlaylists();if(favMode)loadFavs();else loadCats(true)}
 async function addPlaylist(){
  const name=document.getElementById('plName').value.trim()||'My List';
  const url=document.getElementById('plUrl').value.trim();
  if(!url){plMsg('Add an M3U link first.','err');return}
  const btn=document.getElementById('plBtn');btn.disabled=true;btn.textContent='Saving…';plMsg('Fetching playlist…','');
- try{const r=await fetch('/api/playlists',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,url})});
+ try{const r=await fetch('/api/playlists',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,url,icon:selIcon,color:(parseInt(selColor.slice(1),16)>>>0)|0xFF000000})});
  const j=await r.json();
  if(j.ok){document.getElementById('plName').value='';document.getElementById('plUrl').value='';
- plMsg('','');closeAdd();loadPlaylists();loadCats()}
+ plMsg('','');closeAdd();loadPlaylists();loadCats(true)}
  else plMsg(j.error||'Could not save that link.','err')}catch(e){plMsg('Network error — is the TV online?','err')}
  btn.disabled=false;btn.textContent='Save'}
 function connect(){
  try{ws=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws');
  ws.onopen=()=>{setConn(true,'live');pull()};
- ws.onmessage=e=>{try{const j=JSON.parse(e.data);if(j.type==='now'||j.type==='hello')paint(j);if(j.type==='playlists'){loadPlaylists();loadCats()}}catch(_){}};
+ ws.onmessage=e=>{try{const j=JSON.parse(e.data);if(j.type==='now'||j.type==='hello')paint(j);if(j.type==='playlists'){loadPlaylists();loadCats(false)}}catch(_){}};
  ws.onclose=()=>{setConn(false,'retry…');setTimeout(connect,2000)}}catch(e){setConn(false,'offline')}}
-connect();pull();loadPlaylists();loadCats();
+connect();pull();loadPlaylists();loadCats(true);
 setInterval(()=>{if(!ws||ws.readyState!==1)pull()},8000);
+setInterval(()=>{const pg=document.getElementById('pg-remote');if(pg&&pg.classList.contains('on'))loadQualities()},10000);
 </script></body></html>
 ''';
 

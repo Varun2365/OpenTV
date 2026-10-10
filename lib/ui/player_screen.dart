@@ -8,6 +8,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:heroicons/heroicons.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 
 import '../models/tv_channel.dart';
@@ -282,9 +283,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
                                       fit: BoxFit.contain,
                                       errorBuilder: (_, err,
                                               stack) =>
-                                          const Icon(
-                                              Icons
-                                                  .live_tv_rounded,
+                                          const HeroIcon(
+                                              HeroIcons.tv,
                                               color: Color(
                                                   0xFFFFB338),
                                               size: 48),
@@ -377,8 +377,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
                               OutlinedButton.icon(
                                 onPressed: () =>
                                     widget.state.stop(),
-                                icon: const Icon(
-                                    Icons.close_rounded,
+                                icon: const HeroIcon(
+                                    HeroIcons.xMark,
                                     size: 22),
                                 label:
                                     const Text('Cancel'),
@@ -440,9 +440,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
                         mainAxisSize:
                             MainAxisSize.min,
                         children: [
-                          const Icon(
-                              Icons
-                                  .error_outline_rounded,
+                          const HeroIcon(
+                              HeroIcons.exclamationTriangle,
                               color:
                                   Color(0xFFFF7A7A),
                               size: 54),
@@ -500,9 +499,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
                                 onPressed: () =>
                                     widget.player
                                         .retryCurrent(),
-                                icon: const Icon(
-                                    Icons
-                                        .refresh_rounded,
+                                icon: const HeroIcon(
+                                    HeroIcons.arrowPath,
                                     size: 20),
                                 label: const Text(
                                     'Retry'),
@@ -531,9 +529,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
                                   onPressed: () =>
                                       widget.player
                                           .retryVideoOnly(),
-                                  icon: const Icon(
-                                      Icons
-                                          .videocam_rounded,
+                                  icon: const HeroIcon(
+                                      HeroIcons.videoCamera,
                                       size: 20),
                                   label: const Text(
                                       'Video only'),
@@ -620,9 +617,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
                               ch!.logoUrl,
                               fit: BoxFit.cover,
                               errorBuilder: (_, err, stack) =>
-                                  const Icon(
-                                      Icons
-                                          .live_tv_rounded,
+                                  const HeroIcon(
+                                      HeroIcons.tv,
                                       color: Color(
                                           0xFFFFB338),
                                       size: 28),
@@ -729,15 +725,6 @@ class _PlayerScreenState extends State<PlayerScreen> {
                               ],
                             ],
                           ),
-                        ),
-                        const SizedBox(width: 12),
-                        IconButton(
-                          onPressed: () =>
-                              widget.state.stop(),
-                          icon: const Icon(
-                              Icons.close_rounded,
-                              color: Colors.white,
-                              size: 30),
                         ),
                       ],
                     ),

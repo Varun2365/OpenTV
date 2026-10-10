@@ -113,28 +113,74 @@ class AppState extends ChangeNotifier {
   // Favourite channel ids, most-recent first. Tiny — prefs is fine.
   List<String> favouriteIds = [];
 
+  // Preset (built-in, not user-added) categories. Off = sidebar shows
+  // only ★ Favourites + your own pasted lists. Instant + persisted.
+  bool showPresets = true;
+
+  void setShowPresets(bool v) {
+    if (showPresets == v) return;
+    _saveSideCursor();
+    showPresets = v;
+    sideIndex = sideIndex.clamp(0, sideItems.length - 1);
+    _restoreSideCursor();
+    notifyListeners();
+  }
+
+  /// Built-in rails first or user rails first? User lists always lead;
+  /// presets follow only while enabled.
+  List<ChannelRail> get visibleRails => [
+        ...rails.where((r) => r.title.startsWith('★ ')),
+        if (showPresets)
+          ...rails.where((r) => !r.title.startsWith('★ ')),
+      ];
+
   List<SideItem> get sideItems => [
         const SideItem('Favourites', 'fav'),
-        for (final r in rails) SideItem(r.title, r.title),
+        for (final r in visibleRails) SideItem(r.title, r.title),
       ];
 
   /// Channels of the selected sidebar category (favs or the rail).
   List<TvChannel> get sidebarChannels {
-    if (rails.isEmpty) return const [];
     if (sideIndex <= 0) return favouriteChannels;
-    final i = (sideIndex - 1).clamp(0, rails.length - 1);
-    return rails[i].channels;
+    final v = visibleRails;
+    if (v.isEmpty) return const [];
+    final i = (sideIndex - 1).clamp(0, v.length - 1);
+    return v[i].channels;
+  }
+
+  /// Home-grid display order: this category's favourites first, then the
+  /// full category list (favourites included again). The D-pad index runs
+  /// over THIS flat list, so moving across the section boundary is
+  /// seamless — headers are decoration, never focus stops.
+  List<TvChannel> get displayChannels {
+    final all = sidebarChannels;
+    if (all.isEmpty) return const [];
+    final favs = [for (final c in all) if (isFav(c.id)) c];
+    if (favs.isEmpty || favs.length == all.length) return all;
+    return [...favs, ...all];
+  }
+
+  /// Tiles in the Favourites section (0 = single-section grid).
+  int get displayFavCount {
+    final all = sidebarChannels;
+    if (all.isEmpty) return 0;
+    var n = 0;
+    for (final c in all) {
+      if (isFav(c.id)) n++;
+    }
+    return (n == 0 || n == all.length) ? 0 : n;
   }
 
   String get sideTitle {
     if (sideIndex <= 0) return 'Favourites';
-    if (rails.isEmpty) return 'TV';
-    final i = (sideIndex - 1).clamp(0, rails.length - 1);
-    return rails[i].title;
+    final v = visibleRails;
+    if (v.isEmpty) return 'TV';
+    final i = (sideIndex - 1).clamp(0, v.length - 1);
+    return v[i].title;
   }
 
   TvChannel? get focusedChannel {
-    final list = sidebarChannels;
+    final list = displayChannels;
     if (list.isEmpty) return null;
     return list[gridIndex.clamp(0, list.length - 1)];
   }
@@ -152,6 +198,10 @@ class AppState extends ChangeNotifier {
     } else {
       favouriteIds.insert(0, id);
     }
+    // Sections above may have grown/shrunk — keep focus on a live tile.
+    final d = displayChannels;
+    gridIndex =
+        gridIndex.clamp(0, d.isEmpty ? 0 : d.length - 1);
     notifyListeners();
     try {
       final prefs = await SharedPreferences.getInstance();
@@ -245,13 +295,17 @@ class AppState extends ChangeNotifier {
   }
 
   void _restoreSideCursor() {
-    final list = sidebarChannels;
+    final list = displayChannels;
     gridIndex = (_sideCursors[_sideKey()] ?? 0)
         .clamp(0, list.isEmpty ? 0 : list.length - 1);
   }
 
-  String _sideKey() =>
-      sideIndex <= 0 ? 'fav' : rails[(sideIndex - 1).clamp(0, rails.length - 1)].title;
+  String _sideKey() {
+    if (sideIndex <= 0) return 'fav';
+    final v = visibleRails;
+    if (v.isEmpty) return 'fav';
+    return v[(sideIndex - 1).clamp(0, v.length - 1)].title;
+  }
 
   /// Tap a sidebar category: show it and dive straight into its grid.
   void selectSide(int i) {
@@ -673,7 +727,7 @@ class AppState extends ChangeNotifier {
       }
       return;
     }
-    final list = sidebarChannels;
+    final list = displayChannels;
     if (list.isEmpty) {
       // Empty category (e.g. no favourites yet): only way out is left.
       if (key == RemoteKey.left ||

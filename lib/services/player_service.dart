@@ -49,14 +49,19 @@ class PlayerService {
           // HW decode on Linux (V4L2/VAAPI via mpv); keeps UI at 60fps.
           enableHardwareAcceleration: true,
         ));
-    // Restore persisted settings: prebuffer tank (default 5s) and
-    // hold-glide speed for the phone remote (default 6 keys/s).
+    // Restore persisted settings: prebuffer tank (default 5s),
+    // hold-glide speed (default 6 keys/s), QR auto-show + preset
+    // categories (both default on).
     try {
       final prefs = await SharedPreferences.getInstance();
       state.setPrebufferSecs(
           prefs.getInt('opentv_prebuffer_secs') ?? 5);
       state.setRepeatRate(
           prefs.getInt('opentv_repeat_rate') ?? 6);
+      state.setAutoQr(
+          prefs.getBool('opentv_auto_qr') ?? true);
+      state.setShowPresets(
+          prefs.getBool('opentv_show_presets') ?? true);
     } catch (_) {}
     // mpv demuxer/cache tuning for slow HLS origins. Best-effort per
     // property — unknown keys on some builds must never break playback.

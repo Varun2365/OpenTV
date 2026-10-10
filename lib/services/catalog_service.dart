@@ -90,9 +90,8 @@ class CatalogService {
         !res.body.contains('#EXTM3U')) {
       throw 'That link is not an M3U playlist';
     }
-    if (res.body.length > 2 * 1024 * 1024) {
-      throw 'Playlist too large (over 2MB)';
-    }
+    // No size cap: any list size is accepted. The parser downstream
+    // still caps channel count, so huge lists stay Pi-safe.
     final parsed =
         await compute(_parseM3U, _M3UJob(res.body, 'custom'));
     if (parsed.isEmpty) throw 'No playable streams found in that list';

@@ -43,6 +43,7 @@ dependencies:
   sqflite_common_ffi: ^2.3.4
   cached_network_image: ^3.4.1
   qr_flutter: ^4.1.0
+  heroicons: ^0.11.0
 
 dev_dependencies:
   flutter_test:
@@ -67,6 +68,8 @@ flutter:
   uses-material-design: true
 
   assets:
+    - assets/images/bg.png
+    - assets/images/logo.png
     - assets/fonts/GoogleSans-Regular.ttf
     - assets/fonts/GoogleSans-Medium.ttf
     - assets/fonts/GoogleSans-Bold.ttf

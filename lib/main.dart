@@ -37,6 +37,7 @@ Future<void> main() async {
   // Saved pasted lists load first so they appear even if network is slow.
   state.setCatalogLoading('Finding free India channels…');
   state.setCustomPlaylists(await CustomPlaylistStore.load());
+  await state.loadFavourites();
   final (channels, rails) = await CatalogService.load();
   state.setCatalog(channels, rails,
       status: channels.isEmpty
@@ -89,6 +90,22 @@ class OpenTvApp extends StatelessWidget {
           titleLarge: TextStyle(
               color: Color(0xFFF5F1E8), fontWeight: FontWeight.w800),
           bodyMedium: TextStyle(color: Color(0xFFF5F1E8)),
+        ),
+        // One thin, light, pill-shaped scrollbar everywhere (sidebar
+        // list, channel grid, dialogs): 4px thumb, no track, auto-fade.
+        scrollbarTheme: ScrollbarThemeData(
+          thickness: WidgetStatePropertyAll(4.0),
+          radius: Radius.circular(999),
+          thumbColor: WidgetStatePropertyAll(Color(0x47FFFFFF)),
+          trackColor: WidgetStatePropertyAll(Colors.transparent),
+          trackBorderColor:
+              WidgetStatePropertyAll(Colors.transparent),
+          crossAxisMargin: 3.0,
+          mainAxisMargin: 6.0,
+          minThumbLength: 36.0,
+          thumbVisibility: WidgetStatePropertyAll(false),
+          trackVisibility: WidgetStatePropertyAll(false),
+          interactive: true,
         ),
       ),
       home: ListenableBuilder(

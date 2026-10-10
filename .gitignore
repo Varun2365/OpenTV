@@ -43,3 +43,14 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Signing keys & local secrets (never commit these)
+*.jks
+*.keystore
+*.keystore.bak
+*.p12
+.env
+.env.*
+
+# Legacy Flutter plugin symlink file
+.flutter-plugins

@@ -9,14 +9,20 @@ const _a = TvChannel(
 const _b = TvChannel(
     id: 'b', name: 'B News', streamUrl: 'http://x/b.m3u8');
 
+TvChannel _ch(String id) => TvChannel(
+    id: id, name: 'N $id', streamUrl: 'http://x/$id.m3u8');
+
+/// Favourites side item + two rails. Tests drive the grid via sideIndex.
 AppState _twoRail() {
   final s = AppState();
+  s.gridColumns = 6;
   s.setCatalog(
       [_a, _b],
       [
         ChannelRail('India • News', 'sub', [_a]),
         ChannelRail('Global • News', 'sub', [_b]),
       ]);
+  s.selectSide(1);
   return s;
 }
 
@@ -32,36 +38,45 @@ void main() {
         [
           ChannelRail('Test', 'sub', [ch])
         ]);
+    s.selectSide(1);
     expect(s.focusedChannel?.id, 't1');
     s.play(ch);
     expect(s.playing?.id, 't1');
     expect(s.isPlaying, true);
   });
 
-  test('up from first rail enters pill nav, down returns', () {
+  test('sidebar <-> grid zone flow, up never jumps', () {
     final s = _twoRail();
     expect(s.zone, FocusZone.grid);
-    s.handleKey(RemoteKey.up);
-    expect(s.zone, FocusZone.nav);
-    s.handleKey(RemoteKey.down);
+    // Left at column 0 steps back to the sidebar.
+    s.handleKey(RemoteKey.left);
+    expect(s.zone, FocusZone.sidebar);
+    // Right dives back into the channels.
+    s.handleKey(RemoteKey.right);
     expect(s.zone, FocusZone.grid);
-    expect(s.railIndex, 0);
+    // Up on the top row stays in the grid (no auto-jump to sidebar).
+    s.handleKey(RemoteKey.up);
+    expect(s.zone, FocusZone.grid);
+    expect(s.gridIndex, 0);
+    // Back steps out to the sidebar.
+    s.handleKey(RemoteKey.back);
+    expect(s.zone, FocusZone.sidebar);
   });
 
-  test('nav tabs match rails and activate jumps', () {
+  test('sidebar wraps and selects categories', () {
     final s = _twoRail();
-    final labels =
-        s.navTabs.map((t) => t.label).toList();
-    expect(labels, containsAll(['Home', 'India', 'Global', 'News']));
-    // Focus Global tab (index 2) and activate.
-    s.handleKey(RemoteKey.up); // enter nav
-    s.handleKey(RemoteKey.right);
-    s.handleKey(RemoteKey.right);
-    expect(s.navTabs[s.tabIndex].label, 'Global');
-    s.handleKey(RemoteKey.ok);
+    s.zone = FocusZone.sidebar; // sideIndex starts at 1
+    s.handleKey(RemoteKey.up);
+    expect(s.sideIndex, 0); // Favourites
+    s.handleKey(RemoteKey.up); // wraps to last (Global)
+    expect(s.sideIndex, 2);
+    expect(s.sideTitle, 'Global • News');
+    s.handleKey(RemoteKey.down); // wraps back to Favourites
+    expect(s.sideIndex, 0);
+    s.handleKey(RemoteKey.ok); // dive in (empty favs)
     expect(s.zone, FocusZone.grid);
-    expect(s.railIndex, 1);
-    expect(s.focusedChannel?.id, 'b');
+    expect(s.sidebarChannels, isEmpty);
+    expect(s.focusedChannel, isNull);
   });
 
   test('CH keys zap while watching', () {
@@ -73,16 +88,21 @@ void main() {
     expect(s.playing?.id, 'a'); // wraps
   });
 
-  test('cards wrap within a rail', () {    final s = AppState();
+  test('grid 2-D movement with columns', () {
+    final s = AppState();
+    s.gridColumns = 3;
+    final all = [_ch('c1'), _ch('c2'), _ch('c3'), _ch('c4')];
     s.setCatalog(
-        [_a, _b],
-        [
-          ChannelRail('One', 'sub', [_a, _b])
-        ]);
-    s.handleKey(RemoteKey.left); // wraps to last
-    expect(s.cardIndex, 1);
-    s.handleKey(RemoteKey.right); // wraps to first
-    expect(s.cardIndex, 0);
+        all, [ChannelRail('One', 'sub', List.of(all))]);
+    s.selectSide(1);
+    s.handleKey(RemoteKey.right);
+    expect(s.gridIndex, 1);
+    s.handleKey(RemoteKey.down); // +3 → clamps to last
+    expect(s.gridIndex, 3);
+    s.handleKey(RemoteKey.up); // -3 → back to 0
+    expect(s.gridIndex, 0);
+    s.handleKey(RemoteKey.left); // column 0 → sidebar
+    expect(s.zone, FocusZone.sidebar);
   });
 
   test('health sort puts fast first, dead last', () {
@@ -142,31 +162,30 @@ void main() {
     expect(s.playError, isNull);
   });
 
-  test('each rail remembers its own cursor', () {
-    TvChannel ch(String id) => TvChannel(
-        id: id, name: 'N $id', streamUrl: 'http://x/$id.m3u8');
-    final r1 = [ch('a1'), ch('a2'), ch('a3')];
-    final r2 = [ch('b1'), ch('b2'), ch('b3')];
+  test('each category remembers its own cursor', () {
+    final r1 = [_ch('a1'), _ch('a2'), _ch('a3')];
+    final r2 = [_ch('b1'), _ch('b2'), _ch('b3')];
     final s = AppState();
+    s.gridColumns = 6;
     s.setCatalog(
         [...r1, ...r2],
         [
           ChannelRail('R1', 's', r1),
           ChannelRail('R2', 's', r2),
         ]);
+    s.selectSide(1);
     s.handleKey(RemoteKey.right);
     s.handleKey(RemoteKey.right);
-    expect(s.cardIndex, 2); // deep in R1
-    s.handleKey(RemoteKey.down);
-    expect(s.railIndex, 1);
-    expect(s.cardIndex, 0); // R2 starts at its own 0, not 2
+    expect(s.gridIndex, 2); // deep in R1
+    s.selectSide(2); // R2 starts at its own 0, not 2
+    expect(s.sideIndex, 2);
+    expect(s.gridIndex, 0);
     s.handleKey(RemoteKey.right);
-    expect(s.cardIndex, 1); // R2 cursor = 1
-    s.handleKey(RemoteKey.up);
-    expect(s.railIndex, 0);
-    expect(s.cardIndex, 2); // R1 restores 2
-    s.handleKey(RemoteKey.down);
-    expect(s.cardIndex, 1); // R2 restores 1
+    expect(s.gridIndex, 1); // R2 cursor = 1
+    s.selectSide(1); // R1 restores 2
+    expect(s.gridIndex, 2);
+    s.selectSide(2); // R2 restores 1
+    expect(s.gridIndex, 1);
   });
 
   test('repeat rate clamps to 2..12', () {
@@ -175,5 +194,54 @@ void main() {
     expect(s.repeatRate, 12);
     s.setRepeatRate(0);
     expect(s.repeatRate, 2);
+  });
+
+  test('favourites toggle, resolve order + remote status', () {
+    final s = _twoRail();
+    expect(s.favouriteChannels, isEmpty);
+    expect(s.sideItems.first.label, 'Favourites');
+    s.toggleFavourite('b');
+    s.toggleFavourite('a');
+    expect(s.favouriteIds, ['a', 'b']); // most-recent first
+    expect(
+        s.favouriteChannels.map((c) => c.id).toList(), ['a', 'b']);
+    expect(s.isFav('a'), true);
+    s.toggleFavourite('a');
+    expect(s.isFav('a'), false);
+    expect(s.playlistForRail('★ Sports'), isNull);
+    s.setRemoteStatus(connected: true, clients: 1);
+    expect(s.remoteConnected, true);
+    expect(s.remoteClients, 1);
+    s.setAutoQr(false);
+    expect(s.autoQr, false);
+  });
+
+  test('custom list icon + color persist round-trip', () {
+    final s = AppState();
+    const ch = TvChannel(
+        id: 'x1', name: 'X', streamUrl: 'http://x/x.m3u8');
+    s.setCatalog(
+        [ch],
+        [
+          ChannelRail('★ Sports', 's', [ch])
+        ]);
+    expect(s.playlistForRail('★ Sports'), isNull); // not a saved list
+    expect(s.playlistForRail('India'), isNull); // built-ins have none
+  });
+
+  test('preset toggle hides built-ins, keeps user lists', () {
+    final s = _twoRail();
+    expect(s.sideItems.length, 3); // Favourites + 2 presets
+    expect(s.showPresets, true);
+    s.setShowPresets(false);
+    expect(
+        s.sideItems.map((e) => e.label).toList(), ['Favourites']);
+    expect(s.sidebarChannels, isEmpty);
+    expect(s.sideTitle, 'Favourites');
+    // Cursor + favourites survive the toggle.
+    s.toggleFavourite('a');
+    s.setShowPresets(true);
+    expect(s.sideItems.length, 3);
+    expect(s.isFav('a'), true);
   });
 }
