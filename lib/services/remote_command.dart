@@ -14,6 +14,7 @@ enum RemoteKey {
   mute,
   channelUp,
   channelDown,
+  fullscreen,
 }
 
 RemoteKey? remoteKeyFromString(String s) {
@@ -50,6 +51,9 @@ RemoteKey? remoteKeyFromString(String s) {
       return RemoteKey.volDown;
     case 'mute':
       return RemoteKey.mute;
+    case 'fullscreen':
+    case 'f11':
+      return RemoteKey.fullscreen;
     case 'chup':
     case 'channelup':
       return RemoteKey.channelUp;

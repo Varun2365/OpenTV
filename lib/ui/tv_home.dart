@@ -248,6 +248,11 @@ class _TvHomeState extends State<TvHome> {
         }
         return KeyEventResult.handled;
       }
+      // Borderless fullscreen on desktop windowed builds (no-op on Pi).
+      if (e.logicalKey == LogicalKeyboardKey.f11) {
+        s.handleKey(RemoteKey.fullscreen);
+        return KeyEventResult.handled;
+      }
       return KeyEventResult.ignored;
     }
     if (e is KeyUpEvent && _isOkKey(e.logicalKey)) {

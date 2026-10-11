@@ -13,6 +13,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'app_state.dart';
 import 'catalog_service.dart';
 import 'custom_playlist_store.dart';
+import 'pi_detector.dart';
 import 'player_service.dart';
 import 'remote_command.dart';
 import 'stream_health.dart';
@@ -154,6 +155,8 @@ class LocalRemoteServer {
       'muted': s.muted,
       'infoVisible': s.infoVisible,
       'playerListOpen': s.playerListOpen,
+      'fullscreen': s.isFullscreen,
+      'canFullscreen': !isFlutterPi,
       'zone': s.zone.name,
       'focus': s.focusedChannel == null
           ? null
@@ -217,6 +220,8 @@ class LocalRemoteServer {
           'isPlaying': s.isPlaying,
           'infoVisible': s.infoVisible,
           'playerListOpen': s.playerListOpen,
+          'fullscreen': s.isFullscreen,
+          'canFullscreen': !isFlutterPi,
         }));
         ws.listen((raw) {
           try {
@@ -282,6 +287,8 @@ class LocalRemoteServer {
           'muted': s.muted,
           'infoVisible': s.infoVisible,
           'playerListOpen': s.playerListOpen,
+          'fullscreen': s.isFullscreen,
+          'canFullscreen': !isFlutterPi,
           'zone': s.zone.name,
           'focus': s.focusedChannel == null
               ? null
@@ -829,6 +836,7 @@ background:linear-gradient(90deg,transparent,rgba(255,179,56,.55),transparent)}
 .transport{display:grid;grid-template-columns:1.15fr 1fr 1fr 1fr;gap:8px;margin-top:15px}
 .transport button{font-size:13px}
 #infoBtn.on{background:var(--gold-soft);border-color:rgba(255,179,56,.55);color:var(--gold)}
+#fsBtn.on{background:var(--gold-soft);border-color:rgba(255,179,56,.55);color:var(--gold)}
 #muteBtn.on{background:rgba(255,90,90,.12);border-color:rgba(255,90,90,.5);color:#FF7A7A}
 #ppBtn{background:var(--gold);color:var(--gold-ink);border-color:transparent;font-weight:800;
 box-shadow:0 6px 22px rgba(255,179,56,.28)}
@@ -1025,7 +1033,7 @@ box-shadow:0 6px 22px rgba(255,179,56,.25)}
 <button class="ghost" onclick="key('home')">⌂ Home</button>
 <button class="ghost" id="infoBtn" onclick="info()">ⓘ Info</button>
 </div>
-<div style="display:flex;gap:8px;margin-bottom:10px"><button class="ghost" id="favBtn" onclick="toggleFavPlaying()" style="flex:1">☆ Favourite</button></div>
+<div style="display:flex;gap:8px;margin-bottom:10px"><button class="ghost" id="favBtn" onclick="toggleFavPlaying()" style="flex:1">☆ Favourite</button><button class="ghost" id="fsBtn" onclick="key('fullscreen')" style="flex:1">⛶ Fullscreen</button></div>
 <p class="eyebrow">Direction</p>
 <div class="dpad">
 <span></span><button onpointerdown="hold('up',event,true)" onpointerup="unhold()" onpointerleave="unhold()" onpointercancel="unhold()" oncontextmenu="return false" aria-label="Up">▲</button><span></span>
@@ -1168,8 +1176,9 @@ function paint(j){
  document.getElementById('npsub').textContent=sub;
  document.getElementById('ppBtn').textContent=j.isPlaying?'⏸ Pause':'⏯ Play';
  document.getElementById('infoBtn').classList.toggle('on',!!j.infoVisible);
- document.getElementById('muteBtn').classList.toggle('on',!!j.muted);
- document.getElementById('muteBtn').textContent=j.muted?'🔇 Muted — tap to unmute':'Mute';
+  document.getElementById('muteBtn').classList.toggle('on',!!j.muted);
+  document.getElementById('muteBtn').textContent=j.muted?'🔇 Muted — tap to unmute':'Mute';
+  const fsb=document.getElementById('fsBtn');if(fsb){fsb.classList.toggle('on',!!j.fullscreen);fsb.textContent=j.fullscreen?'⛶ Fullscreen ✓':'⛶ Fullscreen';if(j.canFullscreen===false)fsb.style.display='none'}
  const hasPlaying=!!(j.playing&&j.playing.id);
  const cbw=document.getElementById('chanBtnWrap');if(cbw)cbw.style.display=hasPlaying?'block':'none';
  const cbtn=document.getElementById('chanBtn');if(cbtn)cbtn.textContent=j.playerListOpen?'✕ Close list':'☰ Channels — this list';

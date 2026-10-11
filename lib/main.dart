@@ -5,6 +5,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutterpi_gstreamer_video_player/flutterpi_gstreamer_video_player.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:window_manager/window_manager.dart';
 
 import 'models/tv_channel.dart';
 import 'services/app_state.dart';
@@ -29,6 +31,18 @@ Future<void> main() async {
       debugPrint('flutter-pi video plugin register failed: $e');
     }
   }
+  // Desktop window controls (Windows / Linux desktop): borderless
+  // fullscreen for the remote's ⛶ button + F11. Skipped on flutter-pi (no
+  // window manager in a custom embedder — the calls would just throw).
+  if (!isFlutterPi) {
+    try {
+      await windowManager.ensureInitialized();
+      await windowManager.setTitle('OpenTV');
+      await windowManager.setMinimumSize(const Size(960, 600));
+    } catch (e) {
+      debugPrint('window manager unavailable: $e');
+    }
+  }
   // Bound image memory: LRU of ~120 posters / 32MB so hundred-channel
   // rails can never grow the raster cache without limit on the Pi.
   PaintingBinding.instance.imageCache.maximumSize = 120;
@@ -37,6 +51,23 @@ Future<void> main() async {
   final state = AppState();
   final player = PlayerService();
   await player.init(state);
+
+  // Fullscreen applier (desktop only — Pi keeps the null applier, making
+  // every toggle a harmless state flip) + restore the last choice.
+  state.fullscreenApplier = (v) async {
+    if (isFlutterPi) return;
+    try {
+      await windowManager.setFullScreen(v);
+    } catch (e) {
+      debugPrint('setFullScreen failed: $e');
+    }
+  };
+  try {
+    final prefs = await SharedPreferences.getInstance();
+    if (prefs.getBool('opentv_fullscreen') ?? false) {
+      await state.setFullscreen(true);
+    }
+  } catch (_) {}
 
   // Phone-remote server must not block boot — fire and forget.
   // ignore: unawaited_futures

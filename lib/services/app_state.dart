@@ -288,12 +288,36 @@ class AppState extends ChangeNotifier {
   // Stretch video to fill the screen (BoxFit.fill) vs original aspect
   // (BoxFit.contain). Remote setting, persisted, applies instantly.
   bool stretchVideo = false;
-
   void setStretchVideo(bool v) {
     if (stretchVideo == v) return;
     stretchVideo = v;
     notifyListeners();
   }
+
+  // Fullscreen window (desktop windowed builds: Windows / Linux desktop).
+  // Borderless fullscreen, taskbar gone — like a browser fullscreening a
+  // video. No-op on flutter-pi (no window manager in a custom embedder):
+  // the applier is only injected on desktop (see main), so the state flips
+  // harmlessly on Pi while nothing happens on screen.
+  bool isFullscreen = false;
+  Future<void> Function(bool)? fullscreenApplier;
+
+  Future<void> setFullscreen(bool v) async {
+    if (isFullscreen == v) return;
+    isFullscreen = v;
+    notifyListeners();
+    try {
+      await fullscreenApplier?.call(v);
+    } catch (e) {
+      debugPrint('fullscreen apply failed: $e');
+    }
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool('opentv_fullscreen', v);
+    } catch (_) {}
+  }
+
+  Future<void> toggleFullscreen() => setFullscreen(!isFullscreen);
 
   void setAutoQr(bool v) {
     if (autoQr == v) return;
@@ -734,6 +758,14 @@ class AppState extends ChangeNotifier {
   void handleKey(RemoteKey key) {
     lastKey = key;
     lastKeyAt = DateTime.now();
+    // Fullscreen toggle works from anywhere (home, player, overlays) on any
+    // backend — the applier is desktop-only, a no-op everywhere else.
+    if (key == RemoteKey.fullscreen) {
+      unawaited(toggleFullscreen());
+      _keyCtrl.add(key);
+      notifyListeners();
+      return;
+    }
     // While watching, CH+/CH- zaps to the neighbour channel directly.
     if (playing != null &&
         (key == RemoteKey.channelUp ||

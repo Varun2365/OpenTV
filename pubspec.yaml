@@ -50,6 +50,7 @@ dependencies:
   cached_network_image: ^3.4.1
   qr_flutter: ^4.1.0
   heroicons: ^0.11.0
+  window_manager: ^0.5.2
 
 dev_dependencies:
   flutter_test:
