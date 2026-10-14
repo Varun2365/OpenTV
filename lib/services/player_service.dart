@@ -24,6 +24,7 @@
 // channel change from the phone can never leave the previous channel's audio
 // running under a stuck spinner.
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
@@ -112,9 +113,9 @@ class PlayerService extends ChangeNotifier {
   // The ladder contains awaits (breather delay); never run two at once.
   bool _flowBusy = false;
   // Channels whose tank pipeline already failed init this session. Their
-  // retunes go stock directly — a repeat 10s doomed wait on every zap is
+  // retunes go direct (no bank) — a repeat 10s doomed wait on every zap is
   // hectic UX for zero information. Bounded; session-scoped (a slow origin
-  // may succeed later, and stock plays meanwhile anyway).
+  // may succeed later, and direct plays meanwhile anyway).
   final Set<String> _tankSkipIds = {};
   bool _disposed = false;
 
@@ -442,7 +443,8 @@ class PlayerService extends ChangeNotifier {
     // real values once it initializes.
     debugPrint('PlayerService: Pi backend ready — '
         'ensure flutter-pi was rebuilt with gstreamer support and the Pi '
-        'has gstreamer1.0-plugins-{base,good,bad,ugly,libav} installed.');
+        'has gstreamer1.0-plugins-{base,good,bad,ugly,libav} + '
+        'gstreamer1.0-alsa installed (alsa carries the audio branch).');
   }
 
   /// Seek-free play/pause for the Pi backend. VideoPlayerController.play()
@@ -521,7 +523,7 @@ class PlayerService extends ChangeNotifier {
   /// controller.play()/pause() on Pi (see _piPlayRaw), so video_player's
   /// 100ms poll never starts — this try/catch-guarded probing replaces it
   /// at a Pi-friendly cadence. Flow is multi-signal: a moving POSITION or a
-  /// moving BUFFERED-END each prove motion (tank path reports ranges, stock
+  /// moving BUFFERED-END each prove motion (tank path reports ranges, direct
   /// may report neither). A stream with no moving signal is UNKNOWN, never
   /// frozen — recovery would murder healthy playback. Only a throwing poll
   /// (PlatformException = GST_STATE_CHANGE_FAILURE) proves DEATH, and death
@@ -581,7 +583,7 @@ class PlayerService extends ChangeNotifier {
       debugPrint('Pi poll: pipeline dead ($e)');
     } catch (_) {}
     // Second flow signal: buffered-end advance. The tank pipeline's queue2
-    // reports real ranges; stock reports none. Either signal independently
+    // reports real ranges; direct reports none. Either signal independently
     // proves motion (and clears strikes).
     try {
       final end = _piBufferedEnd();
@@ -705,21 +707,35 @@ class PlayerService extends ChangeNotifier {
       'Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36';
 
   /// Tank pipeline: an explicit bank ahead of the decoder. uridecodebin
-  /// (the stock path) hides small internal queues, so stalls hit the screen
-  /// directly. Here queue2 banks [bankSecs] of media, absorbing segment
-  /// jitter and slow origins — REAL stall protection even though it stays
-  /// invisible: the native side sends its buffering query to the pipeline,
-  /// which never reaches queue2 through decodebin, so Dart ranges stay empty
-  /// on both paths (the permanent "Could not query buffering state" spam —
-  /// harmless, ignore it) and the bar remains an elapsed proxy. decodebin
-  /// (not a fixed codec chain) keeps H264/HEVC/etc. working; videoconvert
-  /// lands decoder output in the EGL-uploadable formats appsink accepts. No
-  /// audio branch — same as stock (Pi audio is a separate step). Only the
-  /// element named "sink" is required by the native side; nothing is named
-  /// "src" on purpose, so the native uri/headers/element-added hooks (built
-  /// for uridecodebin) leave this chain untouched — the "Couldn't find src"
-  /// log line is that hook standing down, also harmless.
-  static String _piTankPipeline(String url, int bankSecs) {
+  /// (the old stock path) hides small internal queues, so stalls hit the
+  /// screen directly. Here queue2 banks [bankSecs] of media, absorbing
+  /// segment jitter and slow origins — REAL stall protection even though it
+  /// stays invisible: the native side sends its buffering query to the
+  /// pipeline, which never reaches queue2 through decodebin, so Dart ranges
+  /// stay empty on both paths (the permanent "Could not query buffering
+  /// state" spam — harmless, ignore it) and the bar remains an elapsed
+  /// proxy. decodebin (not a fixed codec chain) keeps H264/HEVC/etc.
+  /// working; videoconvert lands decoder output in the EGL-uploadable
+  /// formats appsink accepts.
+  ///
+  /// AUDIO (the Pi-silent bug): the old string ended at
+  /// `decodebin ! videoconvert ! appsink`, leaving decodebin's audio pad
+  /// unlinked — video arrived, audio went nowhere. The native stock path
+  /// was silent for the same reason (`uridecodebin ! video/x-raw !
+  /// appsink` caps-filters audio away) and native setVolume is an
+  /// unimplemented stub, so BOTH custom pipelines below carry an explicit
+  /// audio branch (`audioconvert ! audioresample ! autoaudiosink`) while
+  /// loudness itself is driven at the OS mixer (see _piApplySystemVolume).
+  /// Only the element named "sink" is required by the native side; nothing
+  /// is named "src" on purpose, so the native uri/headers/element-added
+  /// hooks (built for uridecodebin) leave this chain untouched — the
+  /// "Couldn't find src" log line is that hook standing down, also
+  /// harmless.
+  ///
+  /// decodebin's sometimes-pads tolerate audio-less streams: when a stream
+  /// carries no audio the `d.` audio link simply never materializes and
+  /// video still plays.
+  static String piTankPipeline(String url, int bankSecs) {
     final loc = url.replaceAll('"', '%22');
     final bankNs = bankSecs * 1000000000;
     const queue =
@@ -730,8 +746,30 @@ class PlayerService extends ChangeNotifier {
     final head = _isHlsUrl(url)
         ? '$src ! hlsdemux ! $q'
         : (_isDashUrl(url) ? '$src ! dashdemux ! $q' : '$src ! $q');
-    return '$head ! decodebin ! videoconvert ! appsink name=sink sync=true';
+    return '$head ! $_piDecodeBranches';
   }
+
+  /// Direct (no-bank) Pi pipeline with the SAME audio branch as the tank:
+  /// plays whatever arrives instead of holding N seconds. Replaces the old
+  /// `VideoPlayerController.networkUrl` fallback, whose native pipeline
+  /// (`uridecodebin ! video/x-raw ! appsink`) drops audio — falling back to
+  /// it traded one silence for another.
+  static String piDirectPipeline(String url) {
+    final loc = url.replaceAll('"', '%22');
+    final src =
+        'souphttpsrc location="$loc" user-agent="$_piUserAgent"';
+    final head = _isHlsUrl(url)
+        ? '$src ! hlsdemux'
+        : (_isDashUrl(url) ? '$src ! dashdemux' : src);
+    return '$head ! $_piDecodeBranches';
+  }
+
+  /// Shared decode fan-out: named decodebin splits audio/video; the video
+  /// leg feeds flutter-pi's texture sink, the audio leg feeds the system
+  /// audio sink. Per-leg queues decouple the decode threads.
+  static const _piDecodeBranches = 'decodebin name=d '
+      'd. ! queue ! videoconvert ! appsink name=sink sync=true '
+      'd. ! queue ! audioconvert ! audioresample ! autoaudiosink';
 
   /// Attaches [next] as the live Pi controller and initializes it with a
   /// fail-fast timeout. Returns null on success, the error on failure (the
@@ -785,20 +823,20 @@ class PlayerService extends ChangeNotifier {
     VideoPlayerController? ctrl;
     var tankPath = false;
     // Attempt 1: tank pipeline (explicit bank + observable ranges) — unless
-    // it already failed this channel this session (then stock directly: a
+    // it already failed this channel this session (then direct: a
     // repeat doomed wait on every zap is hectic UX for zero information).
     // Fail-fast (10s): if queue2 can't fill even its low-percent threshold
-    // by then, the origin is too slow for banking and stock (plays whatever
+    // by then, the origin is too slow for banking and direct (plays whatever
     // arrives, no hold) is the better UX.
     if (_tankSkipIds.contains(ch.id)) {
-      debugPrint('Pi open: stock path, tank skipped after earlier '
+      debugPrint('Pi open: direct path, tank skipped after earlier '
           'failure (${ch.name})');
     } else {
       try {
         debugPrint(
             'Pi open: tank pipeline (${ch.name}, bank=${bankSecs}s)');
         final next = FlutterpiVideoPlayerController.withGstreamerPipeline(
-          _piTankPipeline(ch.streamUrl, bankSecs),
+          piTankPipeline(ch.streamUrl, bankSecs),
           formatHint:
               _isHlsUrl(ch.streamUrl) ? VideoFormat.hls : null,
           videoPlayerOptions: VideoPlayerOptions(mixWithOthers: false),
@@ -812,11 +850,11 @@ class PlayerService extends ChangeNotifier {
         ctrl = next;
       } catch (e) {
       debugPrint('Pi tank pipeline failed (${ch.name}): $e — '
-          'falling back to stock path');
+          'falling back to direct path');
       // (helper already disposed + cleared _piCtrl on failure)
       tankPath = false;
       // Missing native plugin fails BOTH paths identically — say so once
-      // instead of running stock into the same wall.
+      // instead of running direct into the same wall.
       if (e is MissingPluginException ||
           '$e'.contains('gstreamerVideoPlayer')) {
         notifyListeners();
@@ -831,21 +869,25 @@ class PlayerService extends ChangeNotifier {
       }
       }
     }
-    // Attempt 2 (only when attempt 1 didn't produce a controller): stock
-    // uridecodebin path (proven to play). Per-channel fallback degrades
-    // gracefully instead of killing the tune.
+    // Attempt 2 (only when attempt 1 didn't produce a controller): direct
+    // custom pipeline WITH audio (proven to play). The old networkUrl
+    // fallback is gone on purpose — its native pipeline
+    // (`uridecodebin ! video/x-raw ! appsink`) caps-filters audio away, so
+    // falling back to it traded one silence for another. Per-channel
+    // fallback still degrades gracefully instead of killing the tune.
     if (ctrl == null) {
       if (seq != _piSeq || _disposed) return;
       if (s.playing?.id != ch.id || s.playError != null) return;
       try {
-        debugPrint('Pi open: stock path (${ch.name})');
-        final next = VideoPlayerController.networkUrl(
-          Uri.parse(ch.streamUrl),
+        debugPrint('Pi open: direct path (${ch.name})');
+        final next =
+            FlutterpiVideoPlayerController.withGstreamerPipeline(
+          piDirectPipeline(ch.streamUrl),
           formatHint:
               _isHlsUrl(ch.streamUrl) ? VideoFormat.hls : null,
           videoPlayerOptions: VideoPlayerOptions(mixWithOthers: false),
-          // Browser UA via the native source-setup hook (souphttpsrc
-          // extra-headers) — same hotlink class as the tank string.
+          // Browser UA via inline souphttpsrc property (no "src" hook
+          // touches custom pipelines) + harmless pass-through below.
           httpHeaders: const {'User-Agent': _piUserAgent},
         );
         final err = await _piAttachInit(next, 25);
@@ -864,7 +906,7 @@ class PlayerService extends ChangeNotifier {
     }
     if (seq != _piSeq || _disposed) return;
     if (s.playing?.id != ch.id || s.playError != null) return;
-    debugPrint('Pi open: ${tankPath ? 'tank' : 'stock'} path live '
+    debugPrint('Pi open: ${tankPath ? 'tank' : 'direct'} path live '
         '(${ch.name})');
 
     _lastProgress = DateTime.now();
@@ -918,9 +960,14 @@ class PlayerService extends ChangeNotifier {
       // NOTE: prebuffering stays TRUE into play — the reveal gate below
       // turns it off. One continuous veil: filling → warming → chrome.
     }
+    // Audible level: controller.setVolume is a native no-op on the Pi
+    // (stub), so the OS mixer carries the real loudness — restore the
+    // AppState level/mute on every tune so a zap never inherits a stale
+    // system level. Fire-and-forget: never block first frame on a mixer.
     try {
       await ctrl.setVolume(s.muted ? 0 : s.volume.clamp(0.0, 1.0));
     } catch (_) {}
+    unawaited(_piApplySystemVolume(s.volume, s.muted));
     final playAt = DateTime.now();
     try {
       await _piPlayRaw(ctrl); // raw: no implicit seekTo(0) on live streams
@@ -957,7 +1004,7 @@ class PlayerService extends ChangeNotifier {
         final elapsed =
             DateTime.now().difference(playAt).inSeconds;
         // Progress: real buffered ranges when the backend reports them
-        // (tank pipeline's queue2 answers buffering queries; the stock
+        // (tank pipeline's queue2 answers buffering queries; the direct
         // path never does — that's the native "Could not query buffering
         // state" spam, harmless). Falls back to a flow-observed proxy so
         // the bar never sits at 0s.
@@ -1237,14 +1284,22 @@ class PlayerService extends ChangeNotifier {
   Future<void> _bumpVolume(int deltaMpv) async {
     try {
       if (_piMode) {
-        final c = _piCtrl;
+        // Pi loudness lives at the OS mixer (native setVolume is an
+        // unimplemented stub), so this works with or without a live
+        // controller — VOL from the remote/menu always answers.
         final s = _state;
-        if (c == null || s == null) return;
+        if (s == null) return;
         final v =
             (s.volume + deltaMpv / 100.0).clamp(0.0, 1.0);
-        await c.setVolume(v);
+        final c = _piCtrl;
+        if (c != null) {
+          try {
+            await c.setVolume(v);
+          } catch (_) {}
+        }
         s.setVolume(v);
         s.setMuted(v == 0);
+        unawaited(_piApplySystemVolume(v, v == 0));
       } else {
         final p = _player;
         if (p == null) return;
@@ -1259,16 +1314,26 @@ class PlayerService extends ChangeNotifier {
   Future<void> _toggleMute() async {
     try {
       if (_piMode) {
-        final c = _piCtrl;
         final s = _state;
-        if (c == null || s == null) return;
+        if (s == null) return;
+        final c = _piCtrl;
         if (s.muted || s.volume == 0) {
-          await c.setVolume(0.8);
+          if (c != null) {
+            try {
+              await c.setVolume(0.8);
+            } catch (_) {}
+          }
           s.setVolume(0.8);
           s.setMuted(false);
+          unawaited(_piApplySystemVolume(0.8, false));
         } else {
-          await c.setVolume(0);
+          if (c != null) {
+            try {
+              await c.setVolume(0);
+            } catch (_) {}
+          }
           s.setMuted(true);
+          unawaited(_piApplySystemVolume(s.volume, true));
         }
       } else {
         final p = _player;
@@ -1279,6 +1344,60 @@ class PlayerService extends ChangeNotifier {
     } catch (e) {
       debugPrint('mute failed: $e');
     }
+  }
+
+  /// One mixer attempt: true when the tool exists and accepted the change.
+  /// Missing binaries throw ProcessException immediately (no hang); a
+  /// short timeout caps slow mixers so a press never wedges the UI.
+  Future<bool> _piRunMixer(String exe, List<String> args) async {
+    try {
+      final r = await Process.run(exe, args)
+          .timeout(const Duration(seconds: 2));
+      return r.exitCode == 0;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Pi loudness, applied at the OS mixer as fire-and-forget: flutter-pi's
+  /// native `setVolume` is an unimplemented stub (player.c `TODO`), so the
+  /// controller call above changes nothing audible — THIS is the real knob
+  /// behind the remote's VOL＋/VOL－/Mute. ALSA first (bare Pi OS), then
+  /// PulseAudio, then PipeWire; first success wins. Never throws, never
+  /// blocks the caller (callers must `unawaited` this).
+  Future<void> _piApplySystemVolume(double v, bool muted) async {
+    if (!_piMode) return;
+    try {
+      final pct =
+          (v.clamp(0.0, 1.0) * 100).round().clamp(0, 100);
+      if (await _piRunMixer(
+          'amixer', ['sset', 'Master', '$pct%', muted ? 'mute' : 'unmute'])) {
+        return;
+      }
+      if (await _piRunMixer('pactl', [
+        'set-sink-volume',
+        '@DEFAULT_SINK@',
+        '$pct%'
+      ])) {
+        await _piRunMixer('pactl', [
+          'set-sink-mute',
+          '@DEFAULT_SINK@',
+          muted ? '1' : '0'
+        ]);
+        return;
+      }
+      if (await _piRunMixer('wpctl', [
+        'set-volume',
+        '@DEFAULT_AUDIO_SINK@',
+        v.clamp(0.0, 1.0).toStringAsFixed(2)
+      ])) {
+        await _piRunMixer('wpctl', [
+          'set-mute',
+          '@DEFAULT_AUDIO_SINK@',
+          muted ? '1' : '0'
+        ]);
+      }
+    } catch (_) {}
   }
 
   Future<void> stop() async {

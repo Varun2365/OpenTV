@@ -1064,10 +1064,10 @@ box-shadow:0 6px 22px rgba(255,179,56,.25)}
 <div class="ctl"><p class="eyebrow">Channel</p>
 <div class="seg"><button onclick="key('channelUp')">CH ＋</button><button onclick="key('channelDown')">CH －</button></div></div>
 <div class="ctl"><p class="eyebrow">Volume</p>
-<div class="seg"><button onclick="key('volUp')">VOL ＋</button><button onclick="key('volDown')">VOL －</button></div></div>
+<div class="seg"><button onpointerdown="hold('volUp',event)" onpointerup="unhold()" onpointerleave="unhold()" onpointercancel="unhold()" oncontextmenu="return false" aria-label="Volume up">VOL ＋</button><button onpointerdown="hold('volDown',event)" onpointerup="unhold()" onpointerleave="unhold()" onpointercancel="unhold()" oncontextmenu="return false" aria-label="Volume down">VOL －</button></div></div>
 </div>
 <div class="util"><button class="ghost" id="favBtn" onclick="toggleFavPlaying()">☆ Favourite</button><button class="ghost" id="fsBtn" onclick="key('fullscreen')">⛶ Fullscreen</button><button class="ghost" id="muteBtn" onclick="key('mute')">Mute</button></div>
-<p class="rmHint">Hold ▲ ▼ ◀ ▶ to glide • OK selects</p></div>
+<p class="rmHint">Hold ▲ ▼ ◀ ▶ or VOL to glide • OK selects</p></div>
 </div></section>
 <section class="page" id="pg-ch">
 <div class="chHead">
