@@ -37,8 +37,20 @@ Future<void> main() async {
   if (!isFlutterPi) {
     try {
       await windowManager.ensureInitialized();
-      await windowManager.setTitle('OpenTV');
-      await windowManager.setMinimumSize(const Size(960, 600));
+      // Wait until the native window is ready before showing it: calling
+      // setFullScreen on a not-yet-shown window saves a garbage restore
+      // rect in the native plugin and can leave the app hidden forever
+      // ("running in Task Manager, nowhere else").
+      await windowManager.waitUntilReadyToShow(
+        const WindowOptions(
+          size: Size(1280, 720),
+          minimumSize: Size(960, 600),
+          center: true,
+          title: 'OpenTV',
+        ),
+      );
+      await windowManager.show();
+      await windowManager.focus();
     } catch (e) {
       debugPrint('window manager unavailable: $e');
     }
@@ -53,20 +65,108 @@ Future<void> main() async {
   await player.init(state);
 
   // Fullscreen applier (desktop only — Pi keeps the null applier, making
-  // every toggle a harmless state flip) + restore the last choice.
-  state.fullscreenApplier = (v) async {
+  // every toggle a harmless state flip).
+  //
+  // Why this is a serialized + verifying wrapper instead of a bare
+  // `setFullScreen(v)`:
+  //  - window_manager 0.5.2 skips its native work when the window is
+  //    already frameless or started maximized → title bar survives and the
+  //    window is not edge-to-edge on some machines. Unmaximizing first
+  //    forces the frameless path, and isFullScreen() verifies the result.
+  //  - Overlapping enter/exit calls corrupt the saved restore rect, which
+  //    is how the window ended up invisible-but-alive in Task Manager.
+  //    One transition runs at a time; rapid remote double-taps coalesce
+  //    into the latest intent.
+  //  - Every path ends with show()+focus() so a failed transition can
+  //    never strand a hidden window.
+  bool fsBusy = false;
+  bool? fsPending;
+  Future<void> applyFullscreen(bool want) async {
     if (isFlutterPi) return;
-    try {
-      await windowManager.setFullScreen(v);
-    } catch (e) {
-      debugPrint('setFullScreen failed: $e');
+    if (fsBusy) {
+      fsPending = want;
+      return;
     }
-  };
+    fsBusy = true;
+    var target = want;
+    try {
+      while (true) {
+        try {
+          // Never restyle a hidden window.
+          try {
+            await windowManager.show();
+          } catch (_) {}
+          if (target) {
+            try {
+              if (await windowManager.isMaximized()) {
+                await windowManager.unmaximize();
+                await Future.delayed(
+                    const Duration(milliseconds: 150));
+              }
+            } catch (_) {}
+            try {
+              await windowManager.focus();
+            } catch (_) {}
+            await windowManager.setFullScreen(true);
+            await Future.delayed(
+                const Duration(milliseconds: 150));
+            var ok = true;
+            try {
+              ok = await windowManager.isFullScreen();
+            } catch (_) {}
+            if (!ok) {
+              // Desync (usually a stale frameless flag in the plugin):
+              // force the frameless path once and retry.
+              try {
+                await windowManager.setAsFrameless();
+                await Future.delayed(
+                    const Duration(milliseconds: 100));
+                await windowManager.setFullScreen(true);
+                await Future.delayed(
+                    const Duration(milliseconds: 150));
+              } catch (_) {}
+            }
+            try {
+              await windowManager.focus();
+            } catch (_) {}
+          } else {
+            await windowManager.setFullScreen(false);
+            await Future.delayed(
+                const Duration(milliseconds: 150));
+            try {
+              await windowManager.show();
+              await windowManager.focus();
+            } catch (_) {}
+            try {
+              if (await windowManager.isFullScreen()) {
+                await windowManager.setFullScreen(false);
+                await windowManager.show();
+              }
+            } catch (_) {}
+          }
+        } catch (e) {
+          debugPrint('setFullScreen failed: $e');
+          try {
+            await windowManager.show();
+          } catch (_) {}
+        }
+        if (fsPending == null) break;
+        target = fsPending!;
+        fsPending = null;
+      }
+    } finally {
+      fsBusy = false;
+    }
+  }
+
+  state.fullscreenApplier = applyFullscreen;
+  // Restore the last choice only AFTER the first frame is on screen: the
+  // native plugin snapshots the window rect on enter, and entering before
+  // Show() snapshots garbage → unrestorable invisible window.
+  bool wantFullscreen = false;
   try {
     final prefs = await SharedPreferences.getInstance();
-    if (prefs.getBool('opentv_fullscreen') ?? false) {
-      await state.setFullscreen(true);
-    }
+    wantFullscreen = prefs.getBool('opentv_fullscreen') ?? false;
   } catch (_) {}
 
   // Phone-remote server must not block boot — fire and forget.
@@ -75,6 +175,18 @@ Future<void> main() async {
   LocalRemoteServer.attachPlayer(player);
 
   runApp(OpenTvApp(state: state, player: player));
+
+  // Deferred fullscreen restore: the native plugin snapshots the window
+  // rect on enter, so entering before Show()/first-frame snapshots garbage
+  // and the window can never be restored (invisible-but-alive hang).
+  if (wantFullscreen && !isFlutterPi) {
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      await Future.delayed(const Duration(milliseconds: 600));
+      try {
+        await state.setFullscreen(true);
+      } catch (_) {}
+    });
+  }
 
   // Catalog after first frame so TV paints instantly, then fills in.
   // Saved pasted lists load first so they appear even if network is slow.

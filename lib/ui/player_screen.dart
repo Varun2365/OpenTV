@@ -849,6 +849,22 @@ class _PlayerScreenState extends State<PlayerScreen> {
                             ],
                           ),
                         ),
+                        // Close button: exits the player back to channels.
+                        IconButton(
+                          onPressed: () =>
+                              widget.state.stop(),
+                          tooltip: 'Close player',
+                          style: IconButton.styleFrom(
+                            backgroundColor:
+                                const Color(0x33FFFFFF),
+                            foregroundColor: Colors.white,
+                            minimumSize:
+                                const Size(52, 52),
+                          ),
+                          icon: const Icon(
+                              Icons.close_rounded,
+                              size: 26),
+                        ),
                       ],
                     ),
                   ),

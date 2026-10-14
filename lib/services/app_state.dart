@@ -303,11 +303,25 @@ class AppState extends ChangeNotifier {
   Future<void> Function(bool)? fullscreenApplier;
 
   Future<void> setFullscreen(bool v) async {
-    if (isFullscreen == v) return;
+    if (isFullscreen == v) {
+      // Resync the native side (recovers a desynced plugin flag) without
+      // flipping state. Timeout: a hung platform channel must never wedge
+      // the UI / remote.
+      try {
+        await fullscreenApplier
+            ?.call(v)
+            .timeout(const Duration(seconds: 5));
+      } catch (e) {
+        debugPrint('fullscreen apply failed: $e');
+      }
+      return;
+    }
     isFullscreen = v;
     notifyListeners();
     try {
-      await fullscreenApplier?.call(v);
+      await fullscreenApplier
+          ?.call(v)
+          .timeout(const Duration(seconds: 5));
     } catch (e) {
       debugPrint('fullscreen apply failed: $e');
     }

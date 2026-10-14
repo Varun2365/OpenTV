@@ -825,39 +825,60 @@ color:var(--muted);text-transform:uppercase;font-weight:800;margin:0}
 .liveDot{width:8px;height:8px;border-radius:50%;background:var(--green);box-shadow:0 0 10px var(--green);
 animation:pulse 2.2s infinite}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
-/* now card */
-.now{position:relative;background:linear-gradient(180deg,#22222F,#14141B);
-border:1px solid var(--line);border-radius:var(--r);padding:18px;overflow:hidden;
-box-shadow:inset 0 1px 0 rgba(255,255,255,.08),0 18px 40px rgba(0,0,0,.35)}
-.now:after{content:"";position:absolute;top:0;left:10%;right:10%;height:1px;
-background:linear-gradient(90deg,transparent,rgba(255,179,56,.55),transparent)}
-.now h2{margin:8px 0 3px;font-size:22px;line-height:1.15;letter-spacing:-.01em}
+/* ── Remote command deck ──
+   Signature: a recessed tactile puck — direction keys sunk into a dark
+   well, OK raised as a gold medallion. Everything else stays quiet so
+   the thumb finds the puck without looking. Scoped to #pg-remote so no
+   other tab is touched. */
+#pg-remote .padX{padding:16px 16px calc(24px + env(safe-area-inset-bottom))}
+#pg-remote .eyebrow{font-size:10px;letter-spacing:.22em}
+.now{position:relative;background:linear-gradient(165deg,#242430 0%,#14141B 55%,#101016 100%);
+border:1px solid var(--line);border-radius:26px;padding:20px 20px 18px;overflow:hidden;
+box-shadow:inset 0 1px 0 rgba(255,255,255,.09),0 22px 44px rgba(0,0,0,.4)}
+.now:after{content:"";position:absolute;top:0;left:12%;right:12%;height:1px;
+background:linear-gradient(90deg,transparent,rgba(255,179,56,.6),transparent)}
+.now h2{margin:10px 0 4px;font-size:26px;line-height:1.12;letter-spacing:-.015em;font-weight:800}
 .now p{margin:0;font-size:13px;color:var(--muted)}
-.transport{display:grid;grid-template-columns:1.15fr 1fr 1fr 1fr;gap:8px;margin-top:15px}
-.transport button{font-size:13px}
+#chanBtnWrap{margin-top:14px;display:none}
+#chanBtn{width:100%;background:transparent;color:var(--gold);border:1px solid rgba(255,179,56,.45);
+font-weight:800;box-shadow:none}
+#chanBtn:active{background:var(--gold-soft)}
+.deck{margin-top:14px;background:linear-gradient(180deg,#15151C,#101016);border:1px solid var(--line);
+border-radius:26px;padding:20px 16px 18px;
+box-shadow:inset 0 1px 0 rgba(255,255,255,.06),0 18px 40px rgba(0,0,0,.35)}
+.transport{display:grid;grid-template-columns:1.2fr 1fr 1fr 1fr;gap:8px;margin:0 0 18px}
+.transport button{font-size:13px;border-radius:16px;min-height:56px}
+#ppBtn{background:linear-gradient(180deg,#FFC65E,var(--gold));color:var(--gold-ink);border:0;font-weight:800;
+box-shadow:0 8px 24px rgba(255,179,56,.3),inset 0 1px 0 rgba(255,255,255,.45)}
+#ppBtn:active{background:var(--gold)}
+#pg-remote .ghost{background:#1E1E28;border-color:rgba(255,255,255,.1);border-radius:16px}
 #infoBtn.on{background:var(--gold-soft);border-color:rgba(255,179,56,.55);color:var(--gold)}
 #fsBtn.on{background:var(--gold-soft);border-color:rgba(255,179,56,.55);color:var(--gold)}
 #muteBtn.on{background:rgba(255,90,90,.12);border-color:rgba(255,90,90,.5);color:#FF7A7A}
-#ppBtn{background:var(--gold);color:var(--gold-ink);border-color:transparent;font-weight:800;
-box-shadow:0 6px 22px rgba(255,179,56,.28)}
-#ppBtn:active{background:var(--gold)}
-.ghost{background:#1B1B24}
-/* deck */
-.deck{margin-top:12px;background:var(--card);border:1px solid var(--line);border-radius:var(--r);
-padding:18px 16px 16px;box-shadow:inset 0 1px 0 rgba(255,255,255,.06)}
-.dpad{display:grid;grid-template-columns:64px 88px 64px;grid-template-rows:58px 78px 58px;
-gap:8px;justify-content:center;align-items:center;margin:12px 0 6px}
-.dpad button{font-size:19px;padding:0;border-radius:18px;background:#23232F}
-.ok{background:var(--gold)!important;color:var(--gold-ink)!important;border-color:transparent!important;
-border-radius:50%!important;width:88px;height:78px;font-size:15px!important;font-weight:800!important;
-letter-spacing:.06em;box-shadow:0 0 0 7px var(--gold-soft),0 0 28px rgba(255,179,56,.38)}
+.puckLabel{display:block;text-align:center}
+.dpad{position:relative;display:grid;grid-template-columns:66px 92px 66px;grid-template-rows:60px 82px 60px;
+gap:8px;justify-content:center;align-items:center;margin:10px auto 2px;width:fit-content;padding:18px;
+background:radial-gradient(circle at 50% 42%,#1D1D27 0%,#121218 68%);border:1px solid var(--line);
+border-radius:36px;box-shadow:inset 0 2px 12px rgba(0,0,0,.55),inset 0 1px 0 rgba(255,255,255,.05)}
+.dpad button{font-size:18px;padding:0;border-radius:20px;background:#262633;border-color:rgba(255,255,255,.1);
+box-shadow:0 4px 12px rgba(0,0,0,.4),inset 0 1px 0 rgba(255,255,255,.1)}
+.ok{background:linear-gradient(180deg,#FFC65E,var(--gold))!important;color:var(--gold-ink)!important;
+border-color:transparent!important;border-radius:50%!important;width:92px;height:82px;font-size:15px!important;
+font-weight:800!important;letter-spacing:.08em;
+box-shadow:0 0 0 7px var(--gold-soft),0 10px 28px rgba(255,179,56,.4),inset 0 1px 0 rgba(255,255,255,.5)!important}
 .ok:active{background:var(--gold)!important}
-.ctl{margin-top:14px}
-.seg{display:flex;border:1px solid var(--line);border-radius:15px;overflow:hidden;background:#101016}
-.seg button{flex:1;border:0;border-radius:0;background:transparent;min-height:54px;font-size:14px;margin:0}
+.stepGrid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:16px}
+.stepGrid .ctl{margin-top:0}
+.ctl{margin-top:16px}
+.seg{display:flex;border:1px solid var(--line);border-radius:18px;overflow:hidden;background:#0D0D12;
+box-shadow:inset 0 2px 8px rgba(0,0,0,.5)}
+.seg button{flex:1;border:0;border-radius:0;background:transparent;min-height:60px;font-size:15px;margin:0;
+font-weight:800;letter-spacing:.04em}
 .seg button+button{border-left:1px solid var(--line)}
 .seg button:active{background:#23232F}
-.wide{width:100%;margin-top:8px;background:#1B1B24}
+.util{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-top:16px}
+.util button{border-radius:16px;font-size:12.5px;min-height:54px}
+.rmHint{font-size:11.5px;color:var(--muted);text-align:center;margin:14px 2px 0;line-height:1.5}
 .hint{font-size:11.5px;color:var(--muted);text-align:center;margin:12px 2px 0;line-height:1.5}
 /* channels: full-bleed chip bar + zero-gap mosaic */
 .chHead{width:100%;max-width:100%;box-sizing:border-box;margin:0;background:#101016;border-top:1px solid var(--line);
@@ -1024,28 +1045,29 @@ box-shadow:0 6px 22px rgba(255,179,56,.25)}
 </header>
 <main id="pages">
 <section class="page on" id="pg-remote"><div class="padX">
-<div class="now"><p class="eyebrow"><span class="liveDot"></span>Now playing</p><h2 id="np">—</h2><p id="npsub">Pick a channel from Channels</p>
+<div class="now"><p class="eyebrow"><span class="liveDot"></span>On the TV</p><h2 id="np">—</h2><p id="npsub">Pick a channel from Channels</p>
 <div id="chanBtnWrap"><button id="chanBtn" onclick="openPlayerList()">☰ Channels — this list</button></div>
 </div>
-<div class="deck"><div class="transport" style="margin-top:0;margin-bottom:14px">
+<div class="deck"><div class="transport">
 <button onclick="key('playPause')" id="ppBtn">⏯ Play</button>
 <button class="ghost" onclick="key('back')">← Back</button>
 <button class="ghost" onclick="key('home')">⌂ Home</button>
 <button class="ghost" id="infoBtn" onclick="info()">ⓘ Info</button>
 </div>
-<div style="display:flex;gap:8px;margin-bottom:10px"><button class="ghost" id="favBtn" onclick="toggleFavPlaying()" style="flex:1">☆ Favourite</button><button class="ghost" id="fsBtn" onclick="key('fullscreen')" style="flex:1">⛶ Fullscreen</button></div>
-<p class="eyebrow">Direction</p>
+<p class="eyebrow puckLabel">Point &amp; glide</p>
 <div class="dpad">
 <span></span><button onpointerdown="hold('up',event,true)" onpointerup="unhold()" onpointerleave="unhold()" onpointercancel="unhold()" oncontextmenu="return false" aria-label="Up">▲</button><span></span>
 <button onpointerdown="hold('left',event)" onpointerup="unhold()" onpointerleave="unhold()" onpointercancel="unhold()" oncontextmenu="return false" aria-label="Left">◀</button><button class="ok" onclick="key('ok')">OK</button><button onpointerdown="hold('right',event)" onpointerup="unhold()" onpointerleave="unhold()" onpointercancel="unhold()" oncontextmenu="return false" aria-label="Right">▶</button>
 <span></span><button onpointerdown="hold('down',event,true)" onpointerup="unhold()" onpointerleave="unhold()" onpointercancel="unhold()" oncontextmenu="return false" aria-label="Down">▼</button><span></span>
 </div>
+<div class="stepGrid">
 <div class="ctl"><p class="eyebrow">Channel</p>
-<div class="seg" style="margin-top:8px"><button onclick="key('channelUp')">CH ＋</button><button onclick="key('channelDown')">CH －</button></div></div>
+<div class="seg"><button onclick="key('channelUp')">CH ＋</button><button onclick="key('channelDown')">CH －</button></div></div>
 <div class="ctl"><p class="eyebrow">Volume</p>
-<div class="seg" style="margin-top:8px"><button onclick="key('volUp')">VOL ＋</button><button onclick="key('volDown')">VOL －</button></div>
-<button class="wide" id="muteBtn" onclick="key('mute')">Mute</button></div>
+<div class="seg"><button onclick="key('volUp')">VOL ＋</button><button onclick="key('volDown')">VOL －</button></div></div>
 </div>
+<div class="util"><button class="ghost" id="favBtn" onclick="toggleFavPlaying()">☆ Favourite</button><button class="ghost" id="fsBtn" onclick="key('fullscreen')">⛶ Fullscreen</button><button class="ghost" id="muteBtn" onclick="key('mute')">Mute</button></div>
+<p class="rmHint">Hold ▲ ▼ ◀ ▶ to glide • OK selects</p></div>
 </div></section>
 <section class="page" id="pg-ch">
 <div class="chHead">
@@ -1177,7 +1199,7 @@ function paint(j){
  document.getElementById('ppBtn').textContent=j.isPlaying?'⏸ Pause':'⏯ Play';
  document.getElementById('infoBtn').classList.toggle('on',!!j.infoVisible);
   document.getElementById('muteBtn').classList.toggle('on',!!j.muted);
-  document.getElementById('muteBtn').textContent=j.muted?'🔇 Muted — tap to unmute':'Mute';
+   document.getElementById('muteBtn').textContent=j.muted?'🔇 Muted':'Mute';
   const fsb=document.getElementById('fsBtn');if(fsb){fsb.classList.toggle('on',!!j.fullscreen);fsb.textContent=j.fullscreen?'⛶ Fullscreen ✓':'⛶ Fullscreen';if(j.canFullscreen===false)fsb.style.display='none'}
  const hasPlaying=!!(j.playing&&j.playing.id);
  const cbw=document.getElementById('chanBtnWrap');if(cbw)cbw.style.display=hasPlaying?'block':'none';

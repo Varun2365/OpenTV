@@ -544,15 +544,9 @@ class _TvHomeState extends State<TvHome> {
                       bottom: 4),
                   child: GestureDetector(
                     onTap: () => s.selectSide(i),
-                    child: AnimatedScale(
-                      // Selected category pops slightly.
-                      scale: active ? 1.045 : 1.0,
+                    child: AnimatedContainer(
                       duration: const Duration(
                           milliseconds: 180),
-                      curve: Curves.easeOut,
-                      child: AnimatedContainer(
-                        duration: const Duration(
-                            milliseconds: 180),
                       padding:
                           const EdgeInsets.symmetric(
                               horizontal: 12,
@@ -571,18 +565,6 @@ class _TvHomeState extends State<TvHome> {
                                 color: const Color(
                                     0xFFFFB338),
                                 width: 1.5)
-                            : null,
-                        // Selected category carries a soft blue glow.
-                        boxShadow: active
-                            ? const [
-                                BoxShadow(
-                                    color: Color(
-                                        0x663D9BFF),
-                                    blurRadius: 20,
-                                    spreadRadius: 1,
-                                    offset:
-                                        Offset(0, 3)),
-                              ]
                             : null,
                       ),
                       child: Row(
@@ -630,7 +612,6 @@ class _TvHomeState extends State<TvHome> {
                           ),
                         ],
                       ),
-                    ),
                     ),
                   ),
                 );
@@ -844,7 +825,7 @@ class _TvHomeState extends State<TvHome> {
         ),
       );
 
-  // ── Grid tile (4px, thin light-blue border + big blue halo) ───────
+  // ── Grid tile (thin light-blue border + subtle blue bg on focus) ───
   Widget _tile(
           TvChannel ch,
           bool isFocus,
@@ -863,8 +844,12 @@ class _TvHomeState extends State<TvHome> {
                 milliseconds: 180),
             curve: Curves.easeOut,
             decoration: BoxDecoration(
-              // Glass tile: the photo backdrop glows faintly through.
-              color: const Color(0xA817171B),
+              // Focused tile gets a subtle blue-tinted bg so the
+              // selection reads even without the halo; unfocused tiles
+              // stay glass (photo backdrop glows faintly through).
+              color: isFocus
+                  ? const Color(0xFF22364F)
+                  : const Color(0xA817171B),
               borderRadius:
                   BorderRadius.circular(4),
               border: Border.all(
@@ -872,16 +857,6 @@ class _TvHomeState extends State<TvHome> {
                       ? const Color(0xCC3D9BFF)
                       : Colors.transparent,
                   width: 1.5),
-              boxShadow: isFocus
-                  ? const [
-                      BoxShadow(
-                          color:
-                              Color(0x883D9BFF),
-                          blurRadius: 36,
-                          spreadRadius: 3,
-                          offset: Offset(0, 8)),
-                    ]
-                  : null,
             ),
             clipBehavior: Clip.antiAlias,
             child: Stack(
